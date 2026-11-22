@@ -10,14 +10,14 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-border: var(--border);
-  --font-sans: Arial;
+  --font-sans: var(--font-ui);
   --font-mono: monospace;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, sans-serif;
+  font-family: var(--font-ui), sans-serif;
 }
 
 .category-wheel[open] {
@@ -67,10 +67,10 @@ button:disabled { cursor: default; opacity: .5; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #0369a1; outline-offset: 2px; }
 .board-shell { height: 100dvh; display:flex; flex-direction:column; padding:12px; gap:10px; overflow:hidden; }
 .board-header { display:flex; align-items:center; flex-wrap:wrap; gap:12px; padding:12px; background:white; border:1px solid #cbd5e1; }
-.brand { display:flex; align-items:center; gap:8px; font-weight:700; color:#334155; }
-.brand b { background:#0369a1; color:white; padding:5px 10px; }
+.brand { display:flex; align-items:center; gap:8px; font-size:1.15rem; font-weight:700; color:#334155; }
+.brand b { background:#0369a1; color:white; font-size:1.35em; padding:4px 8px; }
 .header-tools,.sentence-actions,.field-row,.catalog-toolbar,.board-pagination,.modal-heading { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
-.header-tools { font-size:13px; }
+.header-tools { font-size:15px; }
 .volume-control { display:flex; align-items:center; gap:6px; }
 .volume-control input { width:70px; }
 .board-header button,.board-pagination button,.catalog-toolbar button,.editor-modal button { padding:8px 12px; border:1px solid #cbd5e1; background:#fff; border-radius:6px; }
@@ -109,7 +109,7 @@ button[aria-pressed="true"],button[aria-selected="true"] { box-shadow:inset 0 0 
 
 .aac-tile:hover { border-color:#0369a1; }
 .aac-tile:active { filter:brightness(.95); }
-.tile-content { display:flex; flex-direction:column; justify-content:center; align-items:center; gap:2cqh; width:100%; height:100%; padding:3cqh 3cqw; position:relative; overflow:hidden; }
+.tile-content { display:flex; flex-direction:column; justify-content:center; align-items:center; gap:2cqh; width:100%; height:100%; background:var(--tile-surface, #f8fafc); border:2px solid var(--tile-border, #cbd5e1); color:var(--tile-text, #465365); padding:3cqh 3cqw; position:relative; overflow:hidden; }
 .tile-content img { object-fit:contain; width:min(55cqw,62cqh); height:min(55cqw,62cqh); flex-shrink:1; min-height:0; }
 .tile-label { font-weight:700; font-size:clamp(.75rem,13cqmin,1.4rem); line-height:1.1; overflow-wrap:anywhere; max-width:100%; }
 .tile-content.label-top .tile-label { order:-1; }.tile-content.font-sm .tile-label { font-size:clamp(.75rem,10cqmin,1.1rem); }.tile-content.font-lg .tile-label { font-size:clamp(.75rem,17cqmin,1.8rem); }
@@ -125,9 +125,9 @@ button[aria-pressed="true"],button[aria-selected="true"] { box-shadow:inset 0 0 
 @media(max-width:700px) {
   .board-shell { padding:5px; gap:5px; }
   .board-header { padding:6px; gap:6px; }
-  .brand { font-size:13px; }
+  .brand { font-size:14px; }
   .sentence-strip { order:3; flex-basis:100%; }
-  .header-tools { margin-left:auto; font-size:11px; gap:4px; }
+  .header-tools { margin-left:auto; font-size:12px; gap:4px; }
   .board-header button { padding:6px; min-width:44px; min-height:44px; }
   .volume-control { display:none; }
   .editor-columns { grid-template-columns:1fr; }
@@ -140,7 +140,7 @@ button[aria-pressed="true"],button[aria-selected="true"] { box-shadow:inset 0 0 
 }
 
 .sentence-tokens button { display:flex; align-items:center; gap:5px; }
-.sentence-tokens img { width:26px; height:26px; object-fit:contain; }
+.sentence-tokens img { width:30px; height:30px; object-fit:contain; }
 .speech-symbol { font-size:30cqmin; }
 
 /* Continuous vertical scrolling with page-locked dimensions */
@@ -282,3 +282,8 @@ button[aria-pressed="true"],button[aria-selected="true"] { box-shadow:inset 0 0 
     text-align: center;
     box-sizing: content-box;
 }
+
+/* WiKahon typography */
+h1, h2, h3, h4, .font-heading { font-family: var(--font-heading), sans-serif; }
+.font-aac { font-family: var(--font-aac), sans-serif; }
+.font-ui { font-family: var(--font-ui), sans-serif; }

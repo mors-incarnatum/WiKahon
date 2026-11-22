@@ -5,11 +5,13 @@ export const COLOR_KEYS = [
     "rose",
     "emerald",
     "amber",
+    "yellow",
     "blue",
     "violet",
     "teal",
     "orange",
     "pink",
+    "white",
     "slate",
 ] as const;
 

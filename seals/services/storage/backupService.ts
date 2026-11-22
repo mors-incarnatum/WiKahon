@@ -60,6 +60,8 @@ export async function exportProfilePackage(
         tiles: boardData.tiles,
         boards: boardData.boards,
         catalogOrder: boardData.catalogOrder,
+        colorSystem: boardData.colorSystem,
+        inactiveCatalogLayouts: boardData.inactiveCatalogLayouts,
         gridConfig: boardData.gridConfig,
         layoutMode: boardData.layoutMode,
         tileAppearance: boardData.tileAppearance,

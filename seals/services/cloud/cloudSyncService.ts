@@ -106,7 +106,12 @@ export class CloudSyncService {
             }
 
             // 2. Normalize boards, words (public.words), and folder tiles (public.tiles).
-            const boards: CatalogBoard[] = Object.values(params.boardData.boards);
+            // Include inactive catalogs so shared vocabulary and folder targets retain their database references.
+            const inactiveBoards = Object.values(params.boardData.inactiveCatalogLayouts ?? {})
+                .flatMap(layout => Object.values(layout.boards).filter(board => board.id !== "home"));
+            const boards = [...new Map(
+                [...inactiveBoards, ...Object.values(params.boardData.boards)].map(board => [board.id, board]),
+            ).values()];
             const boardIds = new Set(boards.map(b => b.id));
             const fallbackCategoryId = boardIds.has("home") ? "home" : (boards[0]?.id ?? "home");
             const words: Word[] = [];
@@ -120,7 +125,18 @@ export class CloudSyncService {
                 }
             }
 
+            // Keep the two UI palette additions in settings JSON alongside existing database enum values.
+            const colorOverrides = (entries: { id: string; colorKey?: Tile["colorKey"] }[]) =>
+                Object.fromEntries(entries.flatMap(({ id, colorKey }) =>
+                    colorKey === "yellow" || colorKey === "white" ? [[id, colorKey] as const] : [],
+                ));
             const cloudSettings = {
+                colorSystem: params.boardData.colorSystem,
+                inactiveCatalogLayouts: params.boardData.inactiveCatalogLayouts,
+                colorOverrides: {
+                    boards: colorOverrides(boards),
+                    tiles: colorOverrides([...words, ...folderTiles]),
+                },
                 catalogOrder: params.boardData.catalogOrder,
                 gridConfig: params.boardData.gridConfig,
                 layoutMode: params.boardData.layoutMode,
@@ -232,10 +248,19 @@ export class CloudSyncService {
 
             const defaults = initialData();
             const boardMap: Record<string, CatalogBoard> = {};
-            for (const b of boards) boardMap[b.id] = b;
+            const inactiveIds = new Set(Object.values(settings?.inactiveCatalogLayouts ?? {})
+                .flatMap(layout => Object.keys(layout.boards).filter(id => id !== "home")));
+            const activeIds = new Set(settings?.catalogOrder);
+            for (const board of boards) {
+                if (inactiveIds.has(board.id) && !activeIds.has(board.id)) continue;
+                const override = settings?.colorOverrides?.boards[board.id];
+                boardMap[board.id] = override ? { ...board, colorKey: override } : board;
+            }
             const tileMap: Record<string, Tile> = {};
-            for (const t of words.map(wordToTile)) tileMap[t.id] = t;
-            for (const t of folderTiles) tileMap[t.id] = t;
+            for (const tile of [...words.map(wordToTile), ...folderTiles]) {
+                const override = settings?.colorOverrides?.tiles[tile.id];
+                tileMap[tile.id] = override ? { ...tile, colorKey: override } : tile;
+            }
 
             // Download referenced media into local IndexedDB under the target localProfileId.
             const mediaIds = new Set(Object.values(tileMap).flatMap(tile => (tile.mediaId ? [tile.mediaId] : [])));
@@ -261,6 +286,8 @@ export class CloudSyncService {
                 ...(settings
                     ? {
                           catalogOrder: settings.catalogOrder,
+                          colorSystem: settings.colorSystem,
+                          inactiveCatalogLayouts: settings.inactiveCatalogLayouts,
                           gridConfig: settings.gridConfig,
                           layoutMode: settings.layoutMode ?? defaults.layoutMode,
                           tileAppearance: settings.tileAppearance,

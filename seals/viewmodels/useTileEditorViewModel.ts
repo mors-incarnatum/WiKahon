@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useBoardStore } from "@/store/BoardProvider";
 import {
     uid,
+    resolveBoardTileColor,
     type Tile,
     type CellKey,
     type ColorKey,
@@ -25,6 +26,8 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
     const tiles = useBoardStore(s => s.tiles);
     const boards = useBoardStore(s => s.boards);
     const order = useBoardStore(s => s.catalogOrder);
+    const colorSystem = useBoardStore(s => s.colorSystem ?? "custom");
+    const colorMode = useBoardStore(s => s.tileAppearance.colorMode);
     const activeProfileId = useBoardStore(s => s.activeProfileId);
     const upsert = useBoardStore(s => s.upsertTile);
     const assign = useBoardStore(s => s.assignSlot);
@@ -145,6 +148,8 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
             filter,
             picked,
             preview,
+            previewColor: resolveBoardTileColor(preview, boards, colorMode, colorSystem, target.boardId),
+            canCreateCatalog: colorSystem === "custom",
             folderName,
             words,
             catalogs: order.map(id => boards[id]).filter(Boolean),
@@ -203,7 +208,7 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
                 if (preview.kind === "folder") saveTile(preview);
             },
             createFolder: () => {
-                if (!folderName.trim()) return;
+                if (colorSystem !== "custom" || !folderName.trim()) return;
                 const id = createCatalog({
                     name: folderName,
                     colorKey: preview.colorKey ?? "teal",

@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { resolveTileColor } from "@/lib/board";
+import { resolveBoardTileColor } from "@/lib/board";
 import { palette } from "@/app/theme";
 import { useBoardShellViewModel, SentenceContext } from "@/viewmodels/useBoardShellViewModel";
 import { EditContext } from "@/viewmodels/useEditModeViewModel";
@@ -8,6 +8,73 @@ import SentenceStrip from "./SentenceStrip";
 import BoardSettings from "./BoardSettings";
 import CatalogManager from "./CatalogManager";
 import CategoryWheel from "./CategoryWheel";
+
+type IconName = "volume" | "edit" | "check" | "folder" | "settings";
+
+function HeaderIcon({ name }: { name: IconName }) {
+    const common = {
+        width: 22,
+        height: 22,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 1.8,
+        strokeLinecap: "round" as const,
+        strokeLinejoin: "round" as const,
+        "aria-hidden": true as const,
+    };
+
+    switch (name) {
+        case "volume":
+            return (
+                <svg {...common}>
+                    <path d="M11 5 6 9H3v6h3l5 4z" />
+                    <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+                    <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+                </svg>
+            );
+
+        case "edit":
+            return (
+                <svg {...common}>
+                    <path d="M12 20h9" />
+                    <path d="m16.5 3.5 4 4L8 20l-5 1 1-5z" />
+                </svg>
+            );
+
+        case "check":
+            return (
+                <svg {...common}>
+                    <path d="m5 12 4 4L19 6" />
+                </svg>
+            );
+
+        case "folder":
+            return (
+                <svg {...common}>
+                    <path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                </svg>
+            );
+
+        case "settings":
+            return (
+                <svg {...common}>
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="m19.4 15 .1.1a1.7 1.7 0 0 1-2.4 2.4l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a1.7 1.7 0 0 1-3.4 0v-.2a1.7 1.7 0 0 0-2.9-1.2l-.1.1a1.7 1.7 0 0 1-2.4-2.4l.1-.1a1.7 1.7 0 0 0-1.2-2.9H4a1.7 1.7 0 0 1 0-3.4h.2a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a1.7 1.7 0 0 1 2.4-2.4l.1.1a1.7 1.7 0 0 0 2.9-1.2V4a1.7 1.7 0 0 1 3.4 0v.2a1.7 1.7 0 0 0 2.9 1.2l.1-.1a1.7 1.7 0 0 1 2.4 2.4l-.1.1a1.7 1.7 0 0 0 1.2 2.9h.2a1.7 1.7 0 0 1 0 3.4h-.2a1.7 1.7 0 0 0-1.2 2.9z" />
+                </svg>
+            );
+    }
+}
+
+const iconButtonStyle: React.CSSProperties = {
+    width: 42,
+    height: 42,
+    minWidth: 42,
+    padding: 0,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+};
 
 export default function BoardShell({ children }: { children: React.ReactNode }) {
     const vm = useBoardShellViewModel();
@@ -24,7 +91,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                     onPointerDown={vm.edit.actions.touchActivity}
                     onKeyDown={vm.edit.actions.touchActivity}
                 >
-                    <header className="board-header">
+                    <header className="board-header" style={{ padding: "14px 12px", gap: 12 }}>
                         <Link href="/board" className="brand" onClick={() => vm.actions.setPanel(null)}>
                             <b>W</b> WiKahon
                         </Link>
@@ -38,8 +105,8 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     >
                                         🔑 {vm.state.currentUser.name}
                                     </span>
-                                    <label className="volume-control">
-                                        Volume
+                                    <label className="volume-control" title="Volume">
+                                        <HeaderIcon name="volume" />
                                         <input
                                             aria-label="Volume"
                                             type="range"
@@ -95,16 +162,19 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                 <>
                                     <button
                                         type="button"
+                                        style={iconButtonStyle}
+                                        aria-label={vm.edit.state.isEditMode ? "Done editing" : "Edit"}
+                                        title={vm.edit.state.isEditMode ? "Done editing" : "Edit"}
                                         aria-pressed={vm.edit.state.isEditMode}
                                         onClick={vm.edit.actions.toggle}
                                     >
-                                        ✎ {vm.edit.state.isEditMode ? "Done editing" : "Edit"}
+                                        <HeaderIcon name={vm.edit.state.isEditMode ? "check" : "edit"} />
                                     </button>
-                                    <button type="button" onClick={() => vm.actions.setPanel("catalogs")}>
-                                        Catalogs
+                                    <button type="button" style={iconButtonStyle} aria-label="Catalogs" title="Catalogs" onClick={() => vm.actions.setPanel("catalogs")}>
+                                        <HeaderIcon name="folder" />
                                     </button>
-                                    <button type="button" onClick={() => vm.actions.setPanel("settings")}>
-                                        ⚙ Settings
+                                    <button type="button" style={iconButtonStyle} aria-label="Settings" title="Settings" onClick={() => vm.actions.setPanel("settings")}>
+                                        <HeaderIcon name="settings" />
                                     </button>
                                 </>
                             )}
@@ -143,16 +213,17 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                         >
                             <span className="text-xs font-semibold text-slate-600 mr-1">Pinned:</span>
                             {vm.state.pinnedTiles.map(tile => {
-                                const color = resolveTileColor(
+                                const color = resolveBoardTileColor(
                                     tile,
                                     vm.state.boards,
                                     vm.state.tileAppearance.colorMode,
+                                    vm.state.colorSystem,
                                 );
                                 return (
                                     <button
                                         key={tile.id}
                                         type="button"
-                                        style={palette[color]}
+                                        style={{ backgroundColor: palette[color].surface, borderColor: palette[color].border, color: palette[color].text }}
                                         className="px-2.5 py-1 text-xs font-semibold border rounded-md"
                                         onClick={() => vm.sentence.actions.onTileActivate(tile)}
                                     >

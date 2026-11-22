@@ -232,13 +232,17 @@ export default function TileEditor(props: TileEditorTarget) {
                                     </button>
                                 ))}
                             </div>
-                            <label>
-                                New catalog name
-                                <input value={s.folderName} onChange={e => a.setFolderName(e.target.value)} />
-                            </label>
-                            <button type="button" disabled={!s.folderName.trim()} onClick={a.createFolder}>
-                                Create catalog
-                            </button>
+                            {s.canCreateCatalog && (
+                                <>
+                                    <label>
+                                        New catalog name
+                                        <input value={s.folderName} onChange={e => a.setFolderName(e.target.value)} />
+                                    </label>
+                                    <button type="button" disabled={!s.folderName.trim()} onClick={a.createFolder}>
+                                        Create catalog
+                                    </button>
+                                </>
+                            )}
                             <button
                                 type="button"
                                 className="primary"
@@ -255,11 +259,7 @@ export default function TileEditor(props: TileEditorTarget) {
                     <div className="tile-preview">
                         <TileVisual
                             tile={s.preview}
-                            color={
-                                s.preview.colorKey ??
-                                s.catalogs.find(b => b.id === s.preview.categoryId)?.colorKey ??
-                                "slate"
-                            }
+                            color={s.previewColor}
                         />
                     </div>
                     <p>{s.preview.spokenText || s.preview.label || "Choose a word or create your own."}</p>

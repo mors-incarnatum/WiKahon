@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useMemo, useState } from "react";
-import { useBoardSelector } from "@/store/BoardProvider";
-import { clampGrid, inBounds, type GridConfig } from "@/lib/board";
+import { useRouter } from "next/navigation";
+import { useBoardSelector, useBoardStoreApi } from "@/store/BoardProvider";
+import { clampGrid, inBounds, type GridConfig, type ColorSystemId } from "@/lib/board";
 import { SpeechError, ttsService } from "@/services/tts/ttsService";
 import { exportProfilePackage, validateAndPrepareImport } from "@/services/storage/backupService";
 import { discardPreparedMedia, mediaRepository } from "@/services/storage/mediaRepository";
@@ -17,7 +18,7 @@ import {
 } from "@/app/actions/childAccounts";
 import { validateChildProvisionInput, type ValidationFieldErrors } from "@/lib/validation";
 
-export type SettingsTab = "layout" | "speech" | "profiles" | "experiments";
+export type SettingsTab = "layout" | "appearance" | "colorSystem" | "speech" | "access" | "profiles" | "experiments";
 
 export interface OfflineReadiness {
     appShellCached: boolean;
@@ -26,11 +27,16 @@ export interface OfflineReadiness {
 }
 
 export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsTab = "speech") {
+    const store = useBoardStoreApi();
+    const router = useRouter();
     const {
         boards,
         global,
         globalMode,
         appearance,
+        colorSystem,
+        setColorSystem,
+        resetBoardData,
         speech,
         access,
         featureFlags,
@@ -45,10 +51,6 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         markCloudSynced,
         storageStatus,
         preReflowSnapshot,
-        tiles,
-        catalogOrder,
-        experimentalData,
-        sentence,
         applyBoardSettings,
         setSpeech,
         setAccess,
@@ -69,6 +71,9 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         global: s.gridConfig,
         globalMode: s.layoutMode ?? "manual",
         appearance: s.tileAppearance,
+        colorSystem: s.colorSystem ?? "custom",
+        setColorSystem: s.setColorSystem,
+        resetBoardData: s.resetBoardData,
         speech: s.speechConfig,
         access: s.accessConfig,
         featureFlags: s.featureFlags,
@@ -83,10 +88,6 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         markCloudSynced: s.markCloudSynced,
         storageStatus: s.storageStatus,
         preReflowSnapshot: s.preReflowSnapshot,
-        tiles: s.tiles,
-        catalogOrder: s.catalogOrder,
-        experimentalData: s.experimentalData,
-        sentence: s.sentence,
         applyBoardSettings: s.applyBoardSettings,
         setSpeech: s.setSpeechConfig,
         setAccess: s.setAccessConfig,
@@ -111,7 +112,16 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
     const [draftAppearance, setDraftAppearance] = useState(appearance);
     const [useGlobal, setUseGlobal] = useState(false);
     const [saved, setSaved] = useState(false);
-    const [tab, setTab] = useState<SettingsTab>(initialTab);
+    const [tab, setTab] = useState<SettingsTab>(initialTab === "speech" ? "colorSystem" : initialTab);
+    const [colorDraft, setColorDraft] = useState({
+        profileId: activeProfileId,
+        system: colorSystem,
+        mode: appearance.colorMode,
+        saved: false,
+    });
+    const currentColorDraft = colorDraft.profileId === activeProfileId
+        ? colorDraft
+        : { profileId: activeProfileId, system: colorSystem, mode: appearance.colorMode, saved: false };
 
     const [speechPreviewError, setSpeechPreviewError] = useState("");
 
@@ -238,20 +248,11 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         .filter(item => item.count > 0);
     const overflow = overflowDetails.reduce((n, item) => n + item.count, 0);
 
-    const currentBoardData = () =>
-        extractBoardData({
-            tiles,
-            boards,
-            catalogOrder,
-            gridConfig: global,
-            layoutMode: globalMode,
-            tileAppearance: appearance,
-            speechConfig: speech,
-            accessConfig: access,
-            featureFlags,
-            experimentalData,
-            sentence,
-        });
+    const currentBoardData = () => extractBoardData(store.getState());
+
+    const returnHomeIfCatalogClosed = () => {
+        if (boardId !== "home" && !store.getState().boards[boardId]) router.replace("/board");
+    };
 
     const resetTileDimensions = () => {
         setDraftAppearance(current => ({
@@ -331,6 +332,9 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             draft,
             draftMode,
             appearance: draftAppearance,
+            draftColorSystem: currentColorDraft.system,
+            draftColorMode: currentColorDraft.mode,
+            colorSaved: currentColorDraft.saved,
             speech,
             access,
             featureFlags,
@@ -441,6 +445,21 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             useGlobal: () => {
                 setUseGlobal(true);
                 setSaved(false);
+            },
+            setDraftColorSystem: (value: ColorSystemId) => setColorDraft({ ...currentColorDraft, system: value, saved: false }),
+            setDraftColorMode: (value: BoardData["tileAppearance"]["colorMode"]) => setColorDraft({ ...currentColorDraft, mode: value, saved: false }),
+            applyColorSettings: () => {
+                const saved = setColorSystem(currentColorDraft.system, currentColorDraft.mode);
+                setColorDraft({ ...currentColorDraft, saved });
+                if (saved) returnHomeIfCatalogClosed();
+            },
+            resetBoardData: () => {
+                const ok = resetBoardData();
+                if (ok) {
+                    setColorDraft({ profileId: activeProfileId, system: "custom", mode: "catalog", saved: false });
+                    returnHomeIfCatalogClosed();
+                }
+                return ok;
             },
             setSpeech,
             setAccess,

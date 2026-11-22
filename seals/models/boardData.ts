@@ -1,4 +1,4 @@
-import type { Tile, CatalogBoard, GridConfig, SentenceToken, ColorMode, BoardPage } from "@/lib/board";
+import type { Tile, CatalogBoard, GridConfig, SentenceToken, ColorMode, BoardPage, ColorSystemId } from "@/lib/board";
 
 export interface FeatureFlags {
     animation: boolean;
@@ -26,10 +26,19 @@ export interface ExperimentalData {
     pinnedTileIds?: string[];
 }
 
+export interface CatalogLayout {
+    boards: Record<string, CatalogBoard>;
+    catalogOrder: string[];
+}
+
+export type InactiveCatalogLayouts = Partial<Record<ColorSystemId, CatalogLayout>>;
+
 export interface BoardData {
     tiles: Record<string, Tile>;
     boards: Record<string, CatalogBoard>;
     catalogOrder: string[];
+    colorSystem?: ColorSystemId;
+    inactiveCatalogLayouts?: InactiveCatalogLayouts;
     gridConfig: GridConfig;
     layoutMode?: "manual" | "automatic";
     tileAppearance: {

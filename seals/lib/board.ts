@@ -85,7 +85,54 @@ export const iconPath = (name: string | null, animated = false): string | undefi
     return animated ? entry.animatedPath ?? entry.stillPath : entry.stillPath;
 };
 
-export type ColorKey = "rose" | "emerald" | "amber" | "blue" | "violet" | "teal" | "orange" | "pink" | "slate";
+export type ColorKey =
+    | "rose"
+    | "emerald"
+    | "amber"
+    | "yellow"
+    | "blue"
+    | "violet"
+    | "teal"
+    | "orange"
+    | "pink"
+    | "white"
+    | "slate";
+
+export type ColorSystemId = "custom" | "modifiedFitzgerald" | "tobiiDynavox";
+
+export const COLOR_SYSTEMS: Record<ColorSystemId, { label: string }> = {
+    custom: { label: "Custom Colors" },
+    modifiedFitzgerald: { label: "Modified Fitzgerald" },
+    tobiiDynavox: { label: "Tobii Dynavox" },
+};
+
+export interface PresetCatalogSpec {
+    id: string;
+    name: string;
+    shortName: string;
+    colorKey: ColorKey;
+    iconName: string | null;
+}
+
+export const MODIFIED_FITZGERALD_CATALOGS: PresetCatalogSpec[] = [
+    { id: "mf-pronouns", name: "Pronouns & People", shortName: "People", colorKey: "yellow", iconName: "mother" },
+    { id: "mf-verbs", name: "Verbs / Actions", shortName: "Verbs", colorKey: "emerald", iconName: "eat" },
+    { id: "mf-descriptors", name: "Descriptors", shortName: "Descriptors", colorKey: "blue", iconName: "happy" },
+    { id: "mf-nouns", name: "Nouns / Things", shortName: "Nouns", colorKey: "orange", iconName: "water" },
+    { id: "mf-social", name: "Social Words", shortName: "Social", colorKey: "pink", iconName: "please" },
+    { id: "mf-questions", name: "Question Words", shortName: "Questions", colorKey: "blue", iconName: "speech" },
+    { id: "mf-little", name: "Little / Grammatical Words", shortName: "Little", colorKey: "pink", iconName: "wait" },
+    { id: "mf-places", name: "Places", shortName: "Places", colorKey: "violet", iconName: "toilet" },
+];
+
+export const TOBII_DYNAVOX_CATALOGS: PresetCatalogSpec[] = [
+    { id: "td-pronouns", name: "Pronouns & People", shortName: "People", colorKey: "yellow", iconName: "mother" },
+    { id: "td-verbs", name: "Verbs / Actions", shortName: "Verbs", colorKey: "emerald", iconName: "eat" },
+    { id: "td-questions", name: "Question Words", shortName: "Questions", colorKey: "blue", iconName: "speech" },
+    { id: "td-little", name: "Little Words", shortName: "Little", colorKey: "orange", iconName: "wait" },
+    { id: "td-descriptors", name: "Descriptors", shortName: "Descriptors", colorKey: "white", iconName: "happy" },
+    { id: "td-fringe", name: "Fringe Vocabulary / Nouns", shortName: "Fringe", colorKey: "pink", iconName: "water" },
+];
 export type ColorMode = "catalog" | "wordClass" | "neutral";
 export type WordClass = "social" | "question" | "verb" | "pronoun" | "particle" | "modifier" | "place" | "noun" | "other";
 export type LanguageTag = "fil" | "en" | "taglish";
@@ -191,6 +238,23 @@ export function resolveTileColor(
     }
     if (tile?.colorKey) return tile.colorKey;
     return boards[tile?.categoryId ?? ""]?.colorKey ?? "slate";
+}
+
+export function resolveBoardTileColor(
+    tile: Tile | undefined,
+    boards: Record<string, CatalogBoard>,
+    colorMode: ColorMode,
+    colorSystem: ColorSystemId = "custom",
+    boardId?: string,
+): ColorKey {
+    if (colorSystem === "custom") return resolveTileColor(tile, boards, colorMode);
+    if (!tile) return "slate";
+    if (tile.kind === "folder") return boards[tile.targetBoardId ?? ""]?.colorKey ?? "slate";
+    if (boardId && boardId !== "home" && boards[boardId]) return boards[boardId].colorKey;
+    if (tile.categoryId !== "home" && boards[tile.categoryId]) return boards[tile.categoryId].colorKey;
+    const catalog = Object.values(boards).find(board => board.id !== "home" &&
+        board.pages.some(page => Object.values(page.cells).some(cell => cell?.tileId === tile.id)));
+    return catalog?.colorKey ?? "slate";
 }
 
 export function resolveTokenColor(

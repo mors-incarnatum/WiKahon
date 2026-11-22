@@ -3,15 +3,18 @@ import {
     cellKey,
     clampGrid,
     inBounds,
+    resolveBoardTileColor,
     uid,
     type Tile,
     type CatalogBoard,
     type GridConfig,
     type CellKey,
     type ColorKey,
+    type ColorMode,
+    type ColorSystemId,
     type SentenceToken,
 } from "@/lib/board";
-import { initialData } from "@/lib/boardDefaults";
+import { createPresetCatalogLayout, initialData } from "@/lib/boardDefaults";
 import {
     DEFAULT_FEATURE_FLAGS,
     type BoardData,
@@ -48,6 +51,8 @@ export { initialData };
 const MAX_SENTENCE_HISTORY = 20;
 
 export interface BoardState extends BoardData {
+    setColorSystem: (system: ColorSystemId, mode?: ColorMode) => boolean;
+    resetBoardData: () => boolean;
     // Profile & persistence metadata (W01, W08)
     activeProfileId: string;
     activeProfileName: string;
@@ -118,7 +123,7 @@ export interface BoardState extends BoardData {
     setFeatureFlags: (patch: Partial<FeatureFlags>) => boolean;
 
     // Sentence commands (W04)
-    appendSentenceTile: (tile: Tile) => void;
+    appendSentenceTile: (tile: Tile, boardId?: string) => void;
     removeSentenceTokenAt: (index: number) => void;
     popSentenceToken: () => void;
     clearSentence: (recordHistory?: boolean) => void;
@@ -189,6 +194,8 @@ function extractBoardDataWithSentence(state: BoardData, sentence: SentenceToken[
         tiles: state.tiles,
         boards: state.boards,
         catalogOrder: state.catalogOrder,
+        colorSystem: state.colorSystem ?? "custom",
+        inactiveCatalogLayouts: state.inactiveCatalogLayouts,
         gridConfig: state.gridConfig,
         layoutMode: state.layoutMode ?? "manual",
         tileAppearance: state.tileAppearance,
@@ -492,6 +499,8 @@ function buildActivatedProfileState(params: {
         tiles: doc.boardData.tiles,
         boards: doc.boardData.boards,
         catalogOrder: doc.boardData.catalogOrder,
+        colorSystem: doc.boardData.colorSystem ?? ("custom" as const),
+        inactiveCatalogLayouts: doc.boardData.inactiveCatalogLayouts,
         gridConfig: doc.boardData.gridConfig,
         layoutMode: doc.boardData.layoutMode ?? ("manual" as const),
         tileAppearance: doc.boardData.tileAppearance,
@@ -1492,6 +1501,47 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
 
             clearStorageError: () => set({ storageError: null }),
 
+            setColorSystem: (system, mode) => {
+                if (!canMutateSettings()) return false;
+                const current = get().colorSystem ?? "custom";
+                const colorMode = get().tileAppearance.colorMode;
+                if (system === current && (mode === undefined || mode === colorMode)) return true;
+                return mutateBoard(data => {
+                    if (mode !== undefined) data.tileAppearance.colorMode = mode;
+                    if (system === current) return;
+                    const layouts = data.inactiveCatalogLayouts ?? {};
+                    layouts[current] = { boards: data.boards, catalogOrder: data.catalogOrder };
+                    const next = layouts[system] ??
+                        (system === "custom" ? initialData() : createPresetCatalogLayout(system));
+                    delete layouts[system];
+                    data.colorSystem = system;
+                    data.inactiveCatalogLayouts = layouts;
+                    data.boards = next.boards;
+                    data.catalogOrder = next.catalogOrder;
+                });
+            },
+
+            resetBoardData: () => {
+                const ok = mutateBoard(data => {
+                    const defaults = initialData();
+                    data.tiles = defaults.tiles;
+                    data.boards = defaults.boards;
+                    data.catalogOrder = defaults.catalogOrder;
+                    data.colorSystem = defaults.colorSystem;
+                    data.inactiveCatalogLayouts = undefined;
+                    data.gridConfig = defaults.gridConfig;
+                    data.layoutMode = defaults.layoutMode;
+                    data.tileAppearance = defaults.tileAppearance;
+                    data.sentence = [];
+                    if (data.experimentalData) data.experimentalData.pinnedTileIds = undefined;
+                });
+                if (ok) set(state => ({
+                    sentenceHistory: [],
+                    sentenceRevision: state.sentenceRevision + 1,
+                }));
+                return ok;
+            },
+
             setGridConfig: (grid, id) =>
                 mutateBoard(d => {
                     if (id && d.boards[id]) d.boards[id].gridOverride = clampGrid(grid);
@@ -1607,7 +1657,7 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     d.featureFlags = { ...(d.featureFlags ?? DEFAULT_FEATURE_FLAGS), ...patch };
                 }),
 
-            appendSentenceTile: tile => {
+            appendSentenceTile: (tile, boardId) => {
                 const s = get();
                 const history = pushSentenceHistory(s.sentenceHistory, s.sentence);
                 const nextToken: SentenceToken = {
@@ -1617,7 +1667,9 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     spokenText: tile.spokenText || tile.label,
                     iconName: tile.iconName,
                     mediaId: tile.mediaId ?? null,
-                    colorKey: tile.colorKey ?? s.boards[tile.categoryId]?.colorKey ?? "slate",
+                    colorKey: s.colorSystem && s.colorSystem !== "custom"
+                        ? resolveBoardTileColor(tile, s.boards, s.tileAppearance.colorMode, s.colorSystem, boardId)
+                        : tile.colorKey ?? s.boards[tile.categoryId]?.colorKey ?? "slate",
                     wordClass: tile.wordClass,
                 };
                 const nextSentence = [...s.sentence, nextToken];
@@ -1733,7 +1785,7 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 }),
 
             createCatalog: input => {
-                if (!canMutateSettings()) return null;
+                if (!canMutateSettings() || (get().colorSystem ?? "custom") !== "custom") return null;
                 const id = `cat-${uid()}`;
                 mutateBoard(d => {
                     d.boards[id] = {
@@ -1756,6 +1808,9 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
             updateCatalog: (id, patch) =>
                 mutateBoard(d => {
                     if (!d.boards[id]) return;
+                    if (d.colorSystem && d.colorSystem !== "custom" &&
+                        (patch.name !== undefined || patch.shortName !== undefined ||
+                            patch.colorKey !== undefined || patch.iconName !== undefined)) return;
                     Object.assign(d.boards[id], patch);
                     for (const tile of Object.values(d.tiles)) {
                         if (tile.kind !== "folder" || tile.targetBoardId !== id) continue;

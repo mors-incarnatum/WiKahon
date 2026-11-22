@@ -1,5 +1,9 @@
 import {
     CATEGORY_IDS,
+    COLOR_SYSTEMS,
+    MODIFIED_FITZGERALD_CATALOGS,
+    TOBII_DYNAVOX_CATALOGS,
+    type ColorSystemId,
     CATEGORIES,
     INITIAL_DICTIONARY,
     DEFAULT_GRID,
@@ -13,9 +17,10 @@ import {
     type CellKey,
     type CellPlacement,
 } from "@/lib/board";
-import { DEFAULT_FEATURE_FLAGS, type BoardData } from "@/models/boardData";
+import { DEFAULT_FEATURE_FLAGS, type BoardData, type CatalogLayout, type InactiveCatalogLayouts } from "@/models/boardData";
 import {
     AccessConfigSchema,
+    COLOR_KEYS,
     ChatMessageSchema,
     FeatureFlagsSchema,
     SentenceTokenSchema,
@@ -63,6 +68,7 @@ export function initialData(): BoardData {
         tiles,
         boards,
         catalogOrder: [...CATEGORY_IDS],
+        colorSystem: "custom",
         gridConfig: { ...DEFAULT_GRID },
         layoutMode: "manual",
         tileAppearance: {
@@ -92,17 +98,7 @@ export function initialData(): BoardData {
     };
 }
 
-const VALID_COLOR_KEYS: ReadonlySet<string> = new Set<ColorKey>([
-    "rose",
-    "emerald",
-    "amber",
-    "blue",
-    "violet",
-    "teal",
-    "orange",
-    "pink",
-    "slate",
-]);
+const VALID_COLOR_KEYS: ReadonlySet<string> = new Set(COLOR_KEYS);
 
 const CELL_KEY_RE = /^(0|[1-9]|1[0-5]):(0|[1-9]|1[0-5])$/;
 
@@ -176,6 +172,43 @@ function sanitizeBoards(rawBoards: Record<string, unknown>, fallbackGrid: GridCo
         };
     }
     return boards;
+}
+
+export function readColorSystem(value: unknown): ColorSystemId {
+    return typeof value === "string" && Object.hasOwn(COLOR_SYSTEMS, value)
+        ? value as ColorSystemId
+        : "custom";
+}
+
+export function createPresetCatalogLayout(system: Exclude<ColorSystemId, "custom">): CatalogLayout {
+    const specs = system === "modifiedFitzgerald" ? MODIFIED_FITZGERALD_CATALOGS : TOBII_DYNAVOX_CATALOGS;
+    const boards: CatalogLayout["boards"] = {
+        home: {
+            id: "home", name: "Home", shortName: "Home", colorKey: "slate",
+            iconName: null, isBuiltIn: true, pages: [{ cells: {} }],
+        },
+    };
+    for (const spec of specs) {
+        boards[spec.id] = { ...spec, isBuiltIn: true, pages: [{ cells: {} }] };
+    }
+    return { boards, catalogOrder: specs.map(spec => spec.id) };
+}
+
+export function sanitizeInactiveCatalogLayouts(raw: unknown): InactiveCatalogLayouts | undefined {
+    if (!isPlainObject(raw)) return undefined;
+    const layouts: InactiveCatalogLayouts = {};
+    for (const system of Object.keys(COLOR_SYSTEMS) as ColorSystemId[]) {
+        const layout = raw[system];
+        if (!isPlainObject(layout) || !isPlainObject(layout.boards) || !Array.isArray(layout.catalogOrder)) continue;
+        const boards = sanitizeBoards(layout.boards, DEFAULT_GRID);
+        if (!Object.hasOwn(boards, "home")) continue;
+        layouts[system] = {
+            boards,
+            catalogOrder: layout.catalogOrder.filter((id): id is string =>
+                typeof id === "string" && id !== "home" && Object.hasOwn(boards, id)),
+        };
+    }
+    return layouts;
 }
 
 function sanitizeTiles(
@@ -253,6 +286,8 @@ export function sanitizeBoardData(raw: unknown): BoardData | null {
         catalogOrder: Array.isArray(raw.catalogOrder)
             ? raw.catalogOrder.filter((id): id is string => typeof id === "string")
             : defaults.catalogOrder,
+        colorSystem: readColorSystem(raw.colorSystem),
+        inactiveCatalogLayouts: sanitizeInactiveCatalogLayouts(raw.inactiveCatalogLayouts),
         gridConfig: isPlainObject(raw.gridConfig)
             ? sanitizeGrid(raw.gridConfig, defaults.gridConfig)
             : defaults.gridConfig,

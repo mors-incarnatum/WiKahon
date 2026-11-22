@@ -1,9 +1,11 @@
 "use client";
 /* Animated local symbols intentionally use img to preserve GIF playback when explicitly enabled. */
 /* eslint-disable @next/next/no-img-element */
-import { resolveTileColor, type Tile, type ColorKey, type CatalogBoard } from "@/lib/board";
+import type { CSSProperties } from "react";
+import { resolveBoardTileColor, type Tile, type ColorKey, type CatalogBoard } from "@/lib/board";
 import { palette } from "@/app/theme";
 import type { BoardData } from "@/store/useBoardStore";
+import { useBoardStore } from "@/store/BoardProvider";
 import { useTileInteractionViewModel } from "@/viewmodels/useTileInteractionViewModel";
 import { useMediaUrl } from "@/viewmodels/useMediaUrl";
 
@@ -17,10 +19,13 @@ export function TileVisual({
     appearance?: BoardData["tileAppearance"];
 }) {
     const { src, missingMedia } = useMediaUrl(tile.iconName, tile.mediaId);
+    const p = palette[color] ?? palette.slate;
     return (
         <span
             className={`tile-content label-${appearance?.labelPosition ?? "bottom"} font-${appearance?.fontScale ?? "md"} icon-${appearance?.iconScale ?? "md"}`}
-            style={palette[color]}
+            style={{ backgroundColor: p.surface, borderColor: p.border, color: p.text,
+                "--tile-bg": p.bg, "--tile-surface": p.surface,
+                "--tile-border": p.border, "--tile-text": p.text } as CSSProperties}
         >
             {tile.kind === "folder" && (
                 <span className="folder-badge" aria-hidden="true">
@@ -33,7 +38,7 @@ export function TileVisual({
                 </span>
             )}
             {appearance?.showIcons !== false && src && <img src={src} alt="" draggable={false} />}
-            <span className={`tile-label ${!src || appearance?.showIcons === false ? "text-only" : ""}`}>
+            <span className={`tile-label font-aac ${!src || appearance?.showIcons === false ? "text-only" : ""}`}>
                 {tile.label}
                 {missingMedia && <span className="sr-only"> (photo unavailable)</span>}
             </span>
@@ -48,6 +53,7 @@ export default function TileButton({
     moving,
     color,
     boards,
+    boardId,
     appearance,
     onEdit,
     onMove,
@@ -58,13 +64,16 @@ export default function TileButton({
     moving: boolean;
     color: ColorKey;
     boards?: Record<string, Pick<CatalogBoard, "colorKey">>;
+    boardId?: string;
     appearance: BoardData["tileAppearance"];
     onEdit: () => void;
     onMove?: () => void;
 }) {
-    const events = useTileInteractionViewModel(tile, hidden, onEdit, onMove);
+    const events = useTileInteractionViewModel(tile, hidden, onEdit, onMove, boardId);
+    const colorSystem = useBoardStore(s => s.colorSystem);
+    const allBoards = useBoardStore(s => s.boards);
     const actualColor = boards
-        ? resolveTileColor(tile, boards, appearance.colorMode)
+        ? resolveBoardTileColor(tile, allBoards, appearance.colorMode, colorSystem, boardId)
         : appearance.colorMode === "neutral"
           ? "slate"
           : tile?.colorKey ?? color;

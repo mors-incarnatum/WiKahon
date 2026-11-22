@@ -8,7 +8,9 @@ import type { Tile } from "@/lib/board";
 export function useSentenceViewModel() {
     const tokens = useBoardStore(s => s.sentence);
     const config = useBoardStore(s => s.speechConfig);
-    const appearance = useBoardStore(s => s.tileAppearance);
+    const colorMode = useBoardStore(s =>
+        (s.colorSystem ?? "custom") === "custom" ? s.tileAppearance.colorMode : "catalog",
+    );
     const canUndo = useBoardStore(s => s.sentenceHistory.length > 0);
     const sentenceRevision = useBoardStore(s => s.sentenceRevision);
     const vibrationEnabled = useBoardStore(s => s.featureFlags?.vibration ?? false);
@@ -81,18 +83,18 @@ export function useSentenceViewModel() {
             error,
             canUndo,
             announcement,
-            colorMode: appearance.colorMode,
+            colorMode,
             ...config,
         },
         actions: {
-            onTileActivate: (tile: Tile) => {
+            onTileActivate: (tile: Tile, boardId?: string) => {
                 cancelPendingSpeech();
                 triggerTapVibration(vibrationEnabled);
                 if (clearNext.current) {
                     clear(true);
                     clearNext.current = false;
                 }
-                append(tile);
+                append(tile, boardId);
                 setAnnouncement(`Added ${tile.label}`);
                 if (config.speakOnTap) {
                     void speak(tile.spokenText || tile.label);

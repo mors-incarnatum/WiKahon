@@ -1,14 +1,38 @@
-import { DEFAULT_GRID, type BoardPage, type CatalogBoard, type GridConfig, type LanguageTag, type Tile } from "@/lib/board";
+import { DEFAULT_GRID, type BoardPage, type CatalogBoard, type ColorKey, type GridConfig, type LanguageTag, type Tile } from "@/lib/board";
+import { readColorSystem, sanitizeInactiveCatalogLayouts } from "@/lib/boardDefaults";
 import { DEFAULT_FEATURE_FLAGS, isValidMediaId, type BoardData, type FeatureFlags } from "../boardData";
 import type { Word } from "../word";
 import type { BoardRow, Insert, Json, ProfileSettingsRow, TileRow, WordRow } from "./database.types";
 
-export type CloudSettings = Pick<BoardData, "catalogOrder" | "gridConfig" | "layoutMode" | "tileAppearance" | "speechConfig"> & {
+export type CloudSettings = Pick<BoardData, "catalogOrder" | "colorSystem" | "inactiveCatalogLayouts" | "gridConfig" | "layoutMode" | "tileAppearance" | "speechConfig"> & {
     accessConfig: BoardData["accessConfig"];
     featureFlags?: FeatureFlags;
+    colorOverrides?: {
+        boards: Record<string, ExtendedColor>;
+        tiles: Record<string, ExtendedColor>;
+    };
 };
 
 const BOARD_COLORS = ["rose", "emerald", "amber", "blue", "violet", "teal", "orange", "pink", "slate"] as const;
+type ExtendedColor = Extract<ColorKey, "yellow" | "white">;
+
+function cloudColor(color: ColorKey): BoardRow["color_key"] {
+    if (color === "yellow") return "amber";
+    if (color === "white") return "slate";
+    return color;
+}
+
+function readColorOverrides(value: unknown): CloudSettings["colorOverrides"] {
+    if (!object(value)) return undefined;
+    const read = (entries: unknown): Record<string, ExtendedColor> =>
+        object(entries)
+            ? Object.fromEntries(Object.entries(entries).filter(
+                (entry): entry is [string, ExtendedColor] => entry[1] === "yellow" || entry[1] === "white",
+            ))
+            : {};
+    return { boards: read(value.boards), tiles: read(value.tiles) };
+}
+
 const WORD_CLASSES = [
     "social",
     "question",
@@ -110,7 +134,7 @@ export function boardToRow(profileId: string, board: CatalogBoard): Insert<"boar
         id: board.id,
         name: board.name,
         short_name: board.shortName,
-        color_key: board.colorKey,
+        color_key: cloudColor(board.colorKey),
         icon_name: board.iconName,
         is_built_in: board.isBuiltIn,
         grid_override: gridOverride ? json(gridOverride) : null,
@@ -157,7 +181,7 @@ export function tileToRow(profileId: string, tile: Tile): Insert<"tiles"> {
         category_id: tile.categoryId,
         // The editor may convert a folder to a word while retaining optional fields.
         target_board_id: tile.kind === "folder" ? (tile.targetBoardId ?? null) : null,
-        color_key: tile.colorKey ?? null,
+        color_key: tile.colorKey ? cloudColor(tile.colorKey) : null,
         word_class: tile.wordClass ?? null,
         is_custom: tile.isCustom ?? false,
     };
@@ -204,7 +228,7 @@ export function wordToRow(profileId: string, word: Word): Insert<"words"> {
         media_id: word.mediaId ?? null,
         language: word.language ?? "fil",
         category_id: word.categoryId,
-        color_key: word.colorKey ?? null,
+        color_key: word.colorKey ? cloudColor(word.colorKey) : null,
         word_class: word.wordClass ?? null,
         is_custom: word.isCustom ?? false,
         is_quick_phrase: word.isQuickPhrase ?? false,
@@ -291,6 +315,9 @@ export function settingsFromRow(row: ProfileSettingsRow): CloudSettings {
     const rawGrid = row.grid_config;
     return {
         catalogOrder: [...row.catalog_order],
+        colorSystem: readColorSystem(a.colorSystem),
+        inactiveCatalogLayouts: sanitizeInactiveCatalogLayouts(a.inactiveCatalogLayouts),
+        colorOverrides: readColorOverrides(a.colorOverrides),
         gridConfig: grid(rawGrid),
         layoutMode: (object(rawGrid) && layoutMode(rawGrid.layoutMode)) || "manual",
         tileAppearance: {
@@ -351,6 +378,9 @@ export function settingsToRow(profileId: string, data: CloudSettings): Insert<"p
             showIcons: data.tileAppearance.showIcons,
             gridGap: data.tileAppearance.gridGap,
             colorMode: data.tileAppearance.colorMode,
+            colorSystem: data.colorSystem,
+            inactiveCatalogLayouts: data.inactiveCatalogLayouts,
+            colorOverrides: data.colorOverrides,
             tileWidth: tileDimension(data.tileAppearance.tileWidth),
             tileHeight: tileDimension(data.tileAppearance.tileHeight),
         }),

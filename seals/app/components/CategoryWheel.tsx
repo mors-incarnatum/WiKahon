@@ -60,8 +60,8 @@ export default function CategoryWheel({
                             >
                                 <path
                                     d={sector.path}
-                                    fill={palette[sector.board?.colorKey ?? "slate"].background}
-                                    stroke={palette[sector.board?.colorKey ?? "slate"].borderColor}
+                                    fill={palette[sector.board?.colorKey ?? "slate"].bg}
+                                    stroke={palette[sector.board?.colorKey ?? "slate"].border}
                                     className="wheel-sector-shape"
                                 />
                                 <text
@@ -70,7 +70,7 @@ export default function CategoryWheel({
                                     textAnchor="middle"
                                     dominantBaseline="middle"
                                     fontSize="11"
-                                    fill={palette[sector.board?.colorKey ?? "slate"].color}
+                                    fill={palette[sector.board?.colorKey ?? "slate"].text}
                                 >
                                     {sector.board?.shortName || "More…"}
                                 </text>

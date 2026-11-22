@@ -12,6 +12,7 @@ export function useTileInteractionViewModel(
     hidden: boolean,
     onEdit: () => void,
     onMove: (() => void) | undefined,
+    boardId?: string,
 ) {
     const router = useRouter();
     const sentence = useSentenceContext();
@@ -50,7 +51,7 @@ export function useTileInteractionViewModel(
         if (tile.kind === "folder") {
             router.push(`/board/${encodeURIComponent(tile.targetBoardId || "")}`);
         } else {
-            sentence.actions.onTileActivate(tile);
+            sentence.actions.onTileActivate(tile, boardId);
         }
     };
 

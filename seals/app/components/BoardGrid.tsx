@@ -52,6 +52,7 @@ export default function BoardGrid({ boardId }: { boardId: string }) {
                                     moving={s.moving === c.key && s.movingPage === c.sourcePage}
                                     color={s.boards[c.tile?.categoryId ?? ""]?.colorKey ?? "slate"}
                                     boards={s.boards}
+                                    boardId={boardId}
                                     appearance={s.appearance}
                                     onEdit={() => a.open(c.key, c.sourcePage)}
                                     onMove={

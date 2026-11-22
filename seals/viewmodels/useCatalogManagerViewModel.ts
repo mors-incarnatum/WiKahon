@@ -12,6 +12,7 @@ export function useCatalogManagerViewModel() {
     const remove = useBoardStore(s => s.deleteCatalog);
     const reorder = useBoardStore(s => s.reorderCatalog);
     const folder = useBoardStore(s => s.placeFolderOnHome);
+    const colorSystem = useBoardStore(s => s.colorSystem ?? "custom");
 
     const [selected, setSelected] = useState<string | null>(null);
     const [name, setName] = useState("");
@@ -43,6 +44,8 @@ export function useCatalogManagerViewModel() {
             confirmDelete,
             adding,
             message,
+            colorSystem,
+            homePlacements: new Set(boards.home?.pages.flatMap(page => Object.values(page.cells).map(c => c?.tileId)) ?? []),
         },
         actions: {
             setName,
@@ -53,7 +56,14 @@ export function useCatalogManagerViewModel() {
             setDelete,
             setAdding,
             reset,
+            startCreate: () => {
+                if (colorSystem !== "custom") return;
+                reset();
+                setPlace(true);
+                setSelected("new");
+            },
             select: (id: string) => {
+                if (colorSystem !== "custom") return;
                 const b = boards[id];
                 if (!b) return;
                 setSelected(id);
@@ -63,8 +73,8 @@ export function useCatalogManagerViewModel() {
                 setIcon(b.iconName);
             },
             save: () => {
-                if (!name.trim()) return;
-                if (selected) {
+                if (!name.trim() || colorSystem !== "custom") return;
+                if (selected && selected !== "new") {
                     update(selected, {
                         name: name.trim(),
                         shortName: shortName.trim() || name.trim(),

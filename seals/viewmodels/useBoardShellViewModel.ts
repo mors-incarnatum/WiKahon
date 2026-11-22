@@ -51,6 +51,7 @@ export function useBoardShellViewModel() {
     const featureFlags = useBoardStore(s => s.featureFlags);
     const tiles = useBoardStore(s => s.tiles);
     const boards = useBoardStore(s => s.boards);
+    const colorSystem = useBoardStore(s => s.colorSystem);
     const tileAppearance = useBoardStore(s => s.tileAppearance);
     const pinnedTileIds = useBoardStore(s => s.experimentalData?.pinnedTileIds);
     const chatMessages = useBoardStore(s => s.experimentalData?.chatMessages);
@@ -219,6 +220,7 @@ export function useBoardShellViewModel() {
             pinnedTiles,
             boards,
             tileAppearance,
+            colorSystem,
         },
         actions: {
             setPanel,

@@ -1,6 +1,6 @@
 "use client";
 import { useRef, useState } from "react";
-import { GRID_PRESETS } from "@/lib/board";
+import { COLOR_SYSTEMS, GRID_PRESETS, type ColorSystemId } from "@/lib/board";
 import { useBoardSettingsViewModel } from "@/viewmodels/useBoardSettingsViewModel";
 import { useEditContext } from "@/viewmodels/useEditModeViewModel";
 import type { BoardData } from "@/models/boardData";
@@ -9,6 +9,28 @@ import Modal from "./Modal";
 
 function getDimension(value: number | undefined) {
     return value === undefined || !Number.isFinite(value) ? 50 : Math.max(1, Math.min(100, Math.round(value)));
+}
+
+function Segmented<T extends string>({ label, value, options, onChange }: {
+    label: string;
+    value: T;
+    options: { label: string; value: T }[];
+    onChange: (value: T) => void;
+}) {
+    return (
+        <div className="space-y-2" role="group" aria-label={label}>
+            <span className="text-xs font-bold uppercase tracking-wide">{label}</span>
+            <div className="flex flex-wrap gap-2">
+                {options.map(option => (
+                    <button key={option.value} type="button" aria-pressed={value === option.value}
+                        onClick={() => onChange(option.value)}
+                        className={`rounded-xl border px-3 py-2 text-xs font-bold ${value === option.value ? "border-[#B6D8FA] bg-[#DCEEFF]" : "border-slate-200 bg-[#FFF9EC]/50"}`}>
+                        {option.label}
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
 }
 
 function FieldErrors({ errors }: { errors?: string[] }) {
@@ -38,6 +60,9 @@ export default function BoardSettings({
     const widthUnits = getDimension(s.appearance.tileWidth);
     const heightUnits = getDimension(s.appearance.tileHeight);
 
+    const [resetProfileId, setResetProfileId] = useState<string | null>(null);
+    const [resetStatus, setResetStatus] = useState<{ profileId: string; message: string } | null>(null);
+    const confirmReset = resetProfileId === s.activeProfileId;
     const [widthDraft, setWidthDraft] = useState<string | null>(null);
     const [heightDraft, setHeightDraft] = useState<string | null>(null);
 
@@ -101,12 +126,13 @@ export default function BoardSettings({
             label={initialTab === "layout" ? "Board layout" : "Board settings"}
             onClose={onClose}
             className="editor-modal"
+            style={{ width: "min(672px, calc(100vw - 24px))", borderRadius: "24px", borderColor: "#DCEEFF", color: "#465365" }}
         >
-            <div className="modal-heading">
+            <div className="modal-heading rounded-2xl bg-[#FFF9EC] p-4">
                 <h2>
                     {initialTab === "layout"
-                        ? "Board size & appearance"
-                        : "Guardian settings & profiles"}
+                        ? "Board Layout"
+                        : "Board Settings"}
                 </h2>
                 <button type="button" onClick={onClose} aria-label="Close settings">
                     ✕
@@ -115,7 +141,11 @@ export default function BoardSettings({
 
             {initialTab === "layout" && (
                 <>
-                    <fieldset disabled={!edit.state.isEditMode}>
+                    <div className="tab-row" role="tablist" aria-label="Board layout section">
+                        <button type="button" role="tab" aria-selected={s.tab === "layout"} onClick={() => a.setTab("layout")}>Grid</button>
+                        <button type="button" role="tab" aria-selected={s.tab === "appearance"} onClick={() => a.setTab("appearance")}>Appearance</button>
+                    </div>
+                    <fieldset hidden={s.tab !== "layout"} disabled={!edit.state.isEditMode}>
                         <legend>Board size</legend>
 
                         <div className="settings-section">
@@ -165,7 +195,7 @@ export default function BoardSettings({
                                     disabled={s.scope === "board" && s.useGlobal}
                                     onClick={() => a.setDraftMode("manual")}
                                 >
-                                    Manual
+                                    Manual grid
                                 </button>
 
                                 <button
@@ -174,7 +204,7 @@ export default function BoardSettings({
                                     disabled={s.scope === "board" && s.useGlobal}
                                     onClick={() => a.setDraftMode("automatic")}
                                 >
-                                    Automatic
+                                    Automatic fit
                                 </button>
                             </div>
                         </div>
@@ -268,16 +298,15 @@ export default function BoardSettings({
                                         ))}
                                     </div>
 
-                                    <p>
-                                        {s.overflow} tiles will be repositioned if they fall outside
-                                        the new layout.
-                                    </p>
+                                    <p>Capacity: {s.draft.rows * s.draft.cols} slots per page.</p>
+                                    <p>{s.overflow} tiles fall outside the new layout.</p>
+                                    {s.overflow > 0 && <button type="button" onClick={a.reflow} disabled={s.scope === "board" && s.useGlobal}>Reflow now</button>}
                                 </div>
                             </>
                         )}
 
                         {s.draftMode === "automatic" && (
-                            <div className="settings-section">
+                            <div className="settings-section rounded-2xl border border-slate-200 bg-[#FFF9EC] p-4">
                                 <p>
                                     The board automatically adjusts its rows and columns according
                                     to the available space, tile dimensions, and grid gap.
@@ -286,7 +315,7 @@ export default function BoardSettings({
                         )}
                     </fieldset>
 
-                    <fieldset disabled={!edit.state.isEditMode}>
+                    <fieldset hidden={s.tab !== "appearance"} disabled={!edit.state.isEditMode}>
                         <legend>Tile appearance</legend>
 
                         <div className="settings-section">
@@ -368,107 +397,34 @@ export default function BoardSettings({
                                 </div>
                             </div>
 
-                            <label>
-                                Label position
-                                <select
-                                    value={s.appearance.labelPosition}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            labelPosition: e.target.value as "top" | "bottom",
-                                        })
-                                    }
-                                >
-                                    <option value="top">top</option>
-                                    <option value="bottom">bottom</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                Label size
-                                <select
-                                    value={s.appearance.fontScale}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            fontScale: e.target.value as "sm" | "md" | "lg",
-                                        })
-                                    }
-                                >
-                                    <option value="sm">sm</option>
-                                    <option value="md">md</option>
-                                    <option value="lg">lg</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                Icon size
-                                <select
-                                    value={s.appearance.iconScale}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            iconScale: e.target.value as "sm" | "md" | "lg",
-                                        })
-                                    }
-                                >
-                                    <option value="sm">sm</option>
-                                    <option value="md">md</option>
-                                    <option value="lg">lg</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                Grid gap
-                                <select
-                                    value={s.appearance.gridGap}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            gridGap: e.target.value as BoardData["tileAppearance"]["gridGap"],
-                                        })
-                                    }
-                                >
-                                    <option value="compact">compact</option>
-                                    <option value="normal">normal</option>
-                                    <option value="relaxed">relaxed</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                Colors
-                                <select
-                                    value={s.appearance.colorMode}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            colorMode: e.target.value as BoardData["tileAppearance"]["colorMode"],
-                                        })
-                                    }
-                                >
-                                    <option value="catalog">Catalog</option>
-                                    <option value="wordClass">Modified word-class palette</option>
-                                    <option value="neutral">Neutral (no semantic color)</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                <input
-                                    type="checkbox"
-                                    checked={s.appearance.showIcons}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            showIcons: e.target.checked,
-                                        })
-                                    }
-                                />{" "}
-                                Show icons
-                            </label>
+                            <div className="grid gap-4 sm:grid-cols-2">
+                                <label>Tile width: {widthUnits}%
+                                    <input type="range" min="1" max="100" value={widthUnits} onChange={e => changeDimension("tileWidth", Number(e.target.value))} />
+                                </label>
+                                <label>Tile height: {heightUnits}%
+                                    <input type="range" min="1" max="100" value={heightUnits} onChange={e => changeDimension("tileHeight", Number(e.target.value))} />
+                                </label>
+                                <Segmented label="Label position" value={s.appearance.labelPosition}
+                                    options={[{ label: "Bottom", value: "bottom" }, { label: "Top", value: "top" }]}
+                                    onChange={labelPosition => a.setAppearance({ labelPosition })} />
+                                <Segmented label="Show icons" value={s.appearance.showIcons ? "yes" : "no"}
+                                    options={[{ label: "Show", value: "yes" }, { label: "Hide", value: "no" }]}
+                                    onChange={value => a.setAppearance({ showIcons: value === "yes" })} />
+                                <Segmented label="Text size" value={s.appearance.fontScale}
+                                    options={[{ label: "Small", value: "sm" }, { label: "Medium", value: "md" }, { label: "Large", value: "lg" }]}
+                                    onChange={fontScale => a.setAppearance({ fontScale })} />
+                                <Segmented label="Icon size" value={s.appearance.iconScale}
+                                    options={[{ label: "Small", value: "sm" }, { label: "Medium", value: "md" }, { label: "Large", value: "lg" }]}
+                                    onChange={iconScale => a.setAppearance({ iconScale })} />
+                                <Segmented label="Grid spacing" value={s.appearance.gridGap}
+                                    options={[{ label: "Compact", value: "compact" }, { label: "Normal", value: "normal" }, { label: "Relaxed", value: "relaxed" }]}
+                                    onChange={gridGap => a.setAppearance({ gridGap })} />
+                            </div>
                         </div>
                     </fieldset>
 
                     <div className="settings-section">
+                        {s.canRollbackReflow && <button type="button" disabled={!edit.state.isEditMode} onClick={a.rollbackReflow}>Undo reflow</button>}
                         <button
                             type="button"
                             className="primary"
@@ -486,13 +442,19 @@ export default function BoardSettings({
             {initialTab !== "layout" && (
                 <>
                     <div className="tab-row" role="tablist" aria-label="Settings section">
+                        <button type="button" role="tab" aria-selected={s.tab === "colorSystem"} onClick={() => a.setTab("colorSystem")}>
+                            Color Key
+                        </button>
                         <button
                             type="button"
                             role="tab"
                             aria-selected={s.tab === "speech"}
                             onClick={() => a.setTab("speech")}
                         >
-                            Speech &amp; access
+                            Speech
+                        </button>
+                        <button type="button" role="tab" aria-selected={s.tab === "access"} onClick={() => a.setTab("access")}>
+                            Access
                         </button>
                         <button
                             type="button"
@@ -512,8 +474,35 @@ export default function BoardSettings({
                         </button>
                     </div>
 
+                    <fieldset hidden={s.tab !== "colorSystem"} disabled={!edit.state.isEditMode}>
+                        <legend>Color Key</legend>
+                        <div className="settings-section">
+                            <span>Color coding system</span>
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                {(Object.keys(COLOR_SYSTEMS) as ColorSystemId[]).map(id => (
+                                    <button key={id} type="button" aria-pressed={s.draftColorSystem === id} onClick={() => a.setDraftColorSystem(id)} className={`rounded-xl border px-3 py-2.5 text-xs font-bold ${s.draftColorSystem === id ? "border-[#B6D8FA] bg-[#DCEEFF]" : "border-slate-200 bg-[#FFF9EC]/50"}`}>
+                                        {COLOR_SYSTEMS[id].label}
+                                    </button>
+                                ))}
+                            </div>
+                            <p>{s.draftColorSystem === "custom"
+                                ? "Create and customize your own catalogs, tile colors, and word-class schemes."
+                                : "Uses standard AAC color-coded catalogs. Your Custom Colors layout stays preserved."}</p>
+                            <label>
+                                Tile color mode
+                                <select value={s.draftColorMode} disabled={s.draftColorSystem !== "custom"} onChange={e => a.setDraftColorMode(e.target.value as BoardData["tileAppearance"]["colorMode"])}>
+                                    <option value="catalog">Catalog</option>
+                                    <option value="wordClass">Word class</option>
+                                    <option value="neutral">Neutral (no semantic color)</option>
+                                </select>
+                            </label>
+                            <button type="button" className="primary" onClick={a.applyColorSettings}>Save changes</button>
+                            {s.colorSaved && <p role="status">Changes saved</p>}
+                        </div>
+                    </fieldset>
+
                     <fieldset hidden={s.tab !== "speech"} disabled={!edit.state.isEditMode}>
-                        <legend>Speech &amp; access</legend>
+                        <legend>Speech</legend>
                         <div className="settings-section">
                             <label>
                                 <input
@@ -569,6 +558,12 @@ export default function BoardSettings({
                                     onChange={e => a.setSpeech({ rate: Number(e.target.value) })}
                                 />
                             </label>
+                        </div>
+                    </fieldset>
+
+                    <fieldset hidden={s.tab !== "access"} disabled={!edit.state.isEditMode}>
+                        <legend>Access</legend>
+                        <div className="settings-section">
                             <label>
                                 <input
                                     type="checkbox"
@@ -616,6 +611,31 @@ export default function BoardSettings({
                                     }
                                 />
                             </label>
+                            <div className="rounded-2xl border border-[#F2C4B1] bg-[#FFDFD1]/50 p-4">
+                                <p className="font-bold">Reset board data</p>
+                                <p>Restores default catalogs, vocabulary, and grid, and removes custom layouts and pinned vocabulary for the active profile. The current sentence is cleared. Accounts, chat, and scribble data are kept.</p>
+                                {!confirmReset ? (
+                                    <button type="button" onClick={() => {
+                                        setResetStatus(null);
+                                        setResetProfileId(s.activeProfileId);
+                                    }}>
+                                        Reset board data
+                                    </button>
+                                ) : (
+                                    <div className="flex flex-wrap gap-2">
+                                        <button type="button" onClick={() => {
+                                            const ok = a.resetBoardData();
+                                            setResetStatus({
+                                                profileId: s.activeProfileId,
+                                                message: ok ? "Board data reset." : "Could not reset board data. Check your access and try again.",
+                                            });
+                                            setResetProfileId(null);
+                                        }}>Confirm reset</button>
+                                        <button type="button" onClick={() => setResetProfileId(null)}>Cancel</button>
+                                    </div>
+                                )}
+                                {resetStatus?.profileId === s.activeProfileId && <p role="status">{resetStatus.message}</p>}
+                            </div>
                         </div>
                     </fieldset>
 
