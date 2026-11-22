@@ -6,39 +6,35 @@ import { useBoardStore } from "@/store/BoardProvider";
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function useEditModeViewModel() {
-    const pinVerifier = useBoardStore(s => s.accessConfig.pinVerifier);
-    const isEditUnlocked = useBoardStore(s => s.isEditUnlocked);
-    const unlockEditSession = useBoardStore(s => s.unlockEditSession);
-    const lockEditSession = useBoardStore(s => s.lockEditSession);
     const activeProfileId = useBoardStore(s => s.activeProfileId);
     const currentUser = useBoardStore(s => s.currentUser);
 
     const isGuardian = isGuardianRole(currentUser?.role);
 
-    const [editProfileId, setEditProfileId] = useState<string | null>(null);
-    const [pinDialog, setPinDialog] = useState(false);
-    const [pin, setPin] = useState("");
-    const [error, setError] = useState("");
+    const [editTarget, setEditTarget] = useState<{ userId: string; profileId: string } | null>(null);
     const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    const isEditMode = isGuardian && editProfileId === activeProfileId && (!pinVerifier || isEditUnlocked);
+    const isEditMode =
+        isGuardian &&
+        Boolean(currentUser) &&
+        editTarget?.userId === currentUser?.id &&
+        editTarget?.profileId === activeProfileId;
 
     const lockAll = useCallback(() => {
-        setEditProfileId(null);
-        setPinDialog(false);
-        setPin("");
-        setError("");
-        lockEditSession();
-    }, [lockEditSession]);
+        setEditTarget(null);
+    }, []);
+
+    // A profile or account change ends editing, even if the previous target returns.
+    useEffect(() => () => lockAll(), [currentUser?.id, activeProfileId, isGuardian, lockAll]);
 
     const resetInactivityTimer = useCallback(() => {
         if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
-        if (isGuardian && (isEditMode || isEditUnlocked)) {
+        if (isGuardian && isEditMode) {
             inactivityTimer.current = setTimeout(() => {
                 lockAll();
             }, INACTIVITY_TIMEOUT_MS);
         }
-    }, [isGuardian, isEditMode, isEditUnlocked, lockAll]);
+    }, [isGuardian, isEditMode, lockAll]);
 
     useEffect(() => {
         resetInactivityTimer();
@@ -48,38 +44,14 @@ export function useEditModeViewModel() {
     }, [resetInactivityTimer]);
 
     const enter = () => {
-        if (!isGuardian) return;
-        void unlockEditSession().then(res => {
-            if (res.ok) {
-                setEditProfileId(activeProfileId);
-                resetInactivityTimer();
-            }
-        });
-    };
-
-    const unlock = async () => {
-        if (!isGuardian) return;
-        const res = await unlockEditSession(pin);
-        if (res.ok) {
-            setEditProfileId(activeProfileId);
-            setPinDialog(false);
-            setPin("");
-            setError("");
-            resetInactivityTimer();
-        } else {
-            setError(res.error ?? "Incorrect PIN");
-        }
+        if (!isGuardian || !currentUser) return;
+        setEditTarget({ userId: currentUser.id, profileId: activeProfileId });
     };
 
     return {
         state: {
             isGuardian,
             isEditMode,
-            isEditUnlocked: isGuardian && (!pinVerifier || isEditUnlocked),
-            hasPin: Boolean(pinVerifier),
-            pinDialog: isGuardian && pinDialog,
-            pin,
-            error,
         },
         actions: {
             enter,
@@ -92,13 +64,6 @@ export function useEditModeViewModel() {
                 }
             },
             lock: lockAll,
-            setPin,
-            unlock,
-            closePin: () => {
-                setPinDialog(false);
-                setPin("");
-                setError("");
-            },
             touchActivity: resetInactivityTimer,
         },
     };

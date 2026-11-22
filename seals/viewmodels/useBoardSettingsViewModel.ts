@@ -1,14 +1,21 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useBoardSelector } from "@/store/BoardProvider";
 import { clampGrid, inBounds, type GridConfig } from "@/lib/board";
-import { ANDRES_VOICE, isLanguageCompatible, ttsService, type VoiceDescriptor } from "@/services/tts/ttsService";
+import { SpeechError, ttsService } from "@/services/tts/ttsService";
 import { exportProfilePackage, validateAndPrepareImport } from "@/services/storage/backupService";
 import { discardPreparedMedia, mediaRepository } from "@/services/storage/mediaRepository";
 import { extractBoardData } from "@/store/useBoardStore";
-import type { BoardData, FeatureFlags, SpeechProviderMode } from "@/models/boardData";
+import type { BoardData, FeatureFlags } from "@/models/boardData";
+import { LOCAL_CHILD_SESSION, type ProvisionedChildAccount } from "@/models/auth";
 import { cloudSyncService, type CloudUser } from "@/services/cloud/cloudSyncService";
 import type { ProfileRow } from "@/models/supabase/database.types";
+import {
+    listProvisionedChildAccountsServerAction,
+    provisionChildAccountServerAction,
+    removeChildProfileAccessServerAction,
+} from "@/app/actions/childAccounts";
+import { validateChildProvisionInput, type ValidationFieldErrors } from "@/lib/validation";
 
 export type SettingsTab = "layout" | "speech" | "profiles" | "experiments";
 
@@ -16,7 +23,6 @@ export interface OfflineReadiness {
     appShellCached: boolean;
     localStorageOk: boolean;
     mediaCount: number;
-    compatibleVoicesCount: number;
 }
 
 export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsTab = "speech") {
@@ -28,11 +34,14 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         speech,
         access,
         featureFlags,
+        currentUser,
         profiles,
         activeProfileId,
         activeProfileName,
         cloudProfileId,
         cloudRevision,
+        dirty,
+        localEditVersion,
         markCloudSynced,
         storageStatus,
         preReflowSnapshot,
@@ -43,7 +52,6 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         applyBoardSettings,
         setSpeech,
         setAccess,
-        setEditPin,
         setFeatureFlags,
         reflow,
         rollbackReflow,
@@ -52,6 +60,10 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         renameProfile,
         deleteProfile,
         importProfileDocument,
+        offlineDesignatedProfiles,
+        recoverableLegacyProfiles,
+        setProfileOfflineDesignated,
+        recoverLegacyProfile,
     } = useBoardSelector(s => ({
         boards: s.boards,
         global: s.gridConfig,
@@ -60,11 +72,14 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         speech: s.speechConfig,
         access: s.accessConfig,
         featureFlags: s.featureFlags,
+        currentUser: s.currentUser,
         profiles: s.profiles,
         activeProfileId: s.activeProfileId,
         activeProfileName: s.activeProfileName,
         cloudProfileId: s.cloudProfileId,
         cloudRevision: s.cloudRevision,
+        dirty: s.dirty,
+        localEditVersion: s.localEditVersion,
         markCloudSynced: s.markCloudSynced,
         storageStatus: s.storageStatus,
         preReflowSnapshot: s.preReflowSnapshot,
@@ -75,7 +90,6 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         applyBoardSettings: s.applyBoardSettings,
         setSpeech: s.setSpeechConfig,
         setAccess: s.setAccessConfig,
-        setEditPin: s.setEditPin,
         setFeatureFlags: s.setFeatureFlags,
         reflow: s.setGridConfigAndReflow,
         rollbackReflow: s.rollbackReflow,
@@ -84,6 +98,10 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         renameProfile: s.renameProfile,
         deleteProfile: s.deleteProfile,
         importProfileDocument: s.importProfileDocument,
+        offlineDesignatedProfiles: s.offlineDesignatedProfiles ?? [],
+        recoverableLegacyProfiles: s.recoverableLegacyProfiles ?? [],
+        setProfileOfflineDesignated: s.setProfileOfflineDesignated,
+        recoverLegacyProfile: s.recoverLegacyProfile,
     }));
 
     const [scope, setScope] = useState("global");
@@ -92,39 +110,68 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
     const [draftMode, setDraftMode] = useState<"manual" | "automatic">(globalMode);
     const [draftAppearance, setDraftAppearance] = useState(appearance);
     const [useGlobal, setUseGlobal] = useState(false);
-    const [pin, setPin] = useState("");
     const [saved, setSaved] = useState(false);
     const [tab, setTab] = useState<SettingsTab>(initialTab);
-    const [pinStatus, setPinStatus] = useState<{ ok: boolean; message: string } | null>(null);
 
-    const [voices, setVoices] = useState<VoiceDescriptor[]>([]);
-    const [voicesLoaded, setVoicesLoaded] = useState(false);
     const [speechPreviewError, setSpeechPreviewError] = useState("");
 
     const [newProfileName, setNewProfileName] = useState("");
     const [backupStatus, setBackupStatus] = useState<{ ok: boolean; message: string } | null>(null);
-    const [cloudUser, setCloudUser] = useState<CloudUser | null>(null);
-    const [cloudEmail, setCloudEmail] = useState("");
-    const [cloudPassword, setCloudPassword] = useState("");
+    const [recoveryStatus, setRecoveryStatus] = useState<{ ok: boolean; message: string } | null>(null);
+    const [recoveringId, setRecoveringId] = useState<string | null>(null);
+    const isActiveProfileOfflineDesignated = offlineDesignatedProfiles.some(
+        p => p.localProfileId === activeProfileId,
+    );
+    const sessionCloudUser = useMemo<CloudUser | null>(
+        () =>
+            currentUser && currentUser.id !== LOCAL_CHILD_SESSION.user.id
+                ? { id: currentUser.id, email: currentUser.email }
+                : null,
+        [currentUser],
+    );
     const [cloudProfiles, setCloudProfiles] = useState<ProfileRow[]>([]);
     const [cloudStatus, setCloudStatus] = useState<{ ok: boolean; message: string } | null>(null);
     const [cloudBusy, setCloudBusy] = useState(false);
+    const [staleConflictProfileId, setStaleConflictProfileId] = useState<string | null>(null);
+    const [provisionedChildren, setProvisionedChildren] = useState<ProvisionedChildAccount[]>([]);
+    const [childName, setChildNameState] = useState("");
+    const [childUsername, setChildUsernameState] = useState("");
+    const [childEmail, setChildEmailState] = useState("");
+    const [childPassword, setChildPasswordState] = useState("");
+    const [childConfirmPassword, setChildConfirmPasswordState] = useState("");
+    const [selectedChildProfileId, setSelectedChildProfileIdState] = useState("");
+    const [childFieldErrors, setChildFieldErrors] = useState<ValidationFieldErrors>({});
+    const [childStatus, setChildStatus] = useState<{ ok: boolean; message: string } | null>(null);
+    const [childBusy, setChildBusy] = useState(false);
+
+    const ownedCloudProfiles = useMemo(
+        () => (sessionCloudUser ? cloudProfiles.filter(cp => cp.owner_id === sessionCloudUser.id) : []),
+        [cloudProfiles, sessionCloudUser],
+    );
+    const childProfileId = useMemo(() => {
+        if (ownedCloudProfiles.some(cp => cp.id === selectedChildProfileId)) {
+            return selectedChildProfileId;
+        }
+        if (cloudProfileId && ownedCloudProfiles.some(cp => cp.id === cloudProfileId)) {
+            return cloudProfileId;
+        }
+        return ownedCloudProfiles[0]?.id ?? "";
+    }, [ownedCloudProfiles, selectedChildProfileId, cloudProfileId]);
+    const matchingCloudProfile = useMemo(
+        () => (cloudProfileId ? cloudProfiles.find(cp => cp.id === cloudProfileId) ?? null : null),
+        [cloudProfileId, cloudProfiles],
+    );
+    const cloudConflict = Boolean(
+        (dirty && matchingCloudProfile && (matchingCloudProfile.revision ?? 1) > (cloudRevision ?? 0)) ||
+        staleConflictProfileId === activeProfileId,
+    );
     const [offlineReadiness, setOfflineReadiness] = useState<OfflineReadiness>({
         appShellCached: false,
         localStorageOk: storageStatus === "ok",
         mediaCount: 0,
-        compatibleVoicesCount: 0,
     });
 
-    const refreshVoices = useCallback(async () => {
-        const list = await ttsService.listVoices();
-        setVoices(list);
-        setVoicesLoaded(true);
-        return list;
-    }, []);
-
     const refreshOfflineReadiness = useCallback(async () => {
-        const list = await refreshVoices();
         const media = await mediaRepository.listProfileMedia(activeProfileId);
         let appShellCached = false;
         if (typeof caches !== "undefined" && "serviceWorker" in navigator) {
@@ -146,27 +193,35 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             appShellCached,
             localStorageOk: storageStatus === "ok",
             mediaCount: media.length,
-            compatibleVoicesCount: list.filter(v => v.isFilipinoCompatible).length,
         });
-        if (cloudSyncService.isConfigured()) {
-            const user = await cloudSyncService.getCurrentUser();
-            setCloudUser(user);
-            if (user) {
-                const res = await cloudSyncService.listCloudProfiles();
-                if (res.ok) setCloudProfiles(res.profiles);
-            } else {
-                setCloudProfiles([]);
-            }
+        if (cloudSyncService.isConfigured() && sessionCloudUser) {
+            const [res, childRes] = await Promise.all([
+                cloudSyncService.listCloudProfiles(sessionCloudUser.id),
+                listProvisionedChildAccountsServerAction().catch(() => ({
+                    ok: false,
+                    children: [] as ProvisionedChildAccount[],
+                })),
+            ]);
+            setCloudProfiles(res.profiles);
+            setProvisionedChildren(childRes.ok ? childRes.children : []);
+        } else {
+            setCloudProfiles([]);
+            setProvisionedChildren([]);
         }
-    }, [activeProfileId, refreshVoices, storageStatus]);
+    }, [activeProfileId, sessionCloudUser, storageStatus]);
 
-    useEffect(() => {
-        if (tab !== "speech") return;
-        const refresh = () => { void refreshVoices(); };
-        refresh();
-        window.speechSynthesis?.addEventListener("voiceschanged", refresh);
-        return () => window.speechSynthesis?.removeEventListener("voiceschanged", refresh);
-    }, [tab, refreshVoices]);
+    const clearChildFieldError = (...fields: string[]) => {
+        if (childStatus) setChildStatus(null);
+        if (fields.some(field => Boolean(childFieldErrors[field]))) {
+            setChildFieldErrors(prev => {
+                const next = { ...prev };
+                for (const field of fields) {
+                    delete next[field];
+                }
+                return next;
+            });
+        }
+    };
 
     const affectedBoards = Object.values(boards).filter(b =>
         scope === "global" ? !b.gridOverride : b.id === selected,
@@ -229,12 +284,13 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
     };
 
     const importBackupJson = async (rawJson: string) => {
+        if (!sessionCloudUser) return false;
         const res = await validateAndPrepareImport(rawJson);
         if (!res.ok) {
             setBackupStatus({ ok: false, message: res.error });
             return false;
         }
-        try { importProfileDocument(res.doc); } catch (error) {
+        try { importProfileDocument({ ...res.doc, ownerUserId: sessionCloudUser.id }); } catch (error) {
             await discardPreparedMedia(res.doc.localProfileId);
             setBackupStatus({ ok: false, message: error instanceof Error ? error.message : "Could not save imported profile." });
             return false;
@@ -269,8 +325,6 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
     return {
         state: {
             tab,
-            pinStatus,
-            hasPin: Boolean(access.pinVerifier),
             boards,
             scope,
             selected,
@@ -280,31 +334,46 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             speech,
             access,
             featureFlags,
-            pin,
             saved,
             useGlobal,
             overflow,
             overflowDetails,
             canRollbackReflow: Boolean(preReflowSnapshot),
             preview: Array.from({ length: draft.rows * draft.cols }),
-            voices: voices.filter(voice => voice.provider === "local" && isLanguageCompatible(voice.lang, speech.languageTag || "fil-PH")),
-            voicesLoaded,
             speechPreviewError,
             profiles,
             activeProfileId,
             activeProfileName,
             cloudProfileId,
             cloudRevision,
+            dirty,
+            localEditVersion,
+            cloudConflict,
+            conflictProfile: matchingCloudProfile,
             cloudConfigured: cloudSyncService.isConfigured(),
-            cloudUser,
-            cloudEmail,
-            cloudPassword,
-            cloudProfiles,
+            cloudUser: sessionCloudUser,
+            cloudProfiles: sessionCloudUser ? cloudProfiles : [],
+            ownedCloudProfiles,
             cloudStatus,
             cloudBusy,
+            provisionedChildren: sessionCloudUser ? provisionedChildren : [],
+            childName,
+            childUsername,
+            childEmail,
+            childPassword,
+            childConfirmPassword,
+            childProfileId,
+            childFieldErrors,
+            childStatus,
+            childBusy,
             newProfileName,
             backupStatus,
             offlineReadiness,
+            offlineDesignatedProfiles,
+            isActiveProfileOfflineDesignated,
+            recoverableLegacyProfiles,
+            recoveryStatus,
+            recoveringId,
         },
         actions: {
             setTab: (nextTab: SettingsTab) => {
@@ -374,39 +443,20 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                 setSaved(false);
             },
             setSpeech,
-            setSpeechProvider: (provider: SpeechProviderMode) => {
-                setSpeechPreviewError("");
-                setSpeech({
-                    provider,
-                    voiceId: provider === "cloud-puter" ? ANDRES_VOICE.id : null,
-                    languageTag: provider === "cloud-puter" ? ANDRES_VOICE.lang : "fil-PH",
-                });
-            },
             setAccess,
             setFeatureFlags: (patch: Partial<FeatureFlags>) => setFeatureFlags(patch),
-            setPin: (value: string) => {
-                setPin(value);
-                setPinStatus(null);
-            },
-            savePin: async () => {
-                const ok = await setEditPin(pin);
-                if (ok) setPin("");
-                setPinStatus({ ok, message: ok ? "Guardian PIN saved." : "Could not save the guardian PIN. Enter 4 to 12 digits and try again." });
-            },
-            refreshVoices,
             previewSpeech: async () => {
                 setSpeechPreviewError("");
                 try {
                     await ttsService.speak({
                         text: "Kumusta, gusto ko ng tubig",
-                        languageTag: speech.languageTag || "fil-PH",
-                        provider: speech.provider ?? "local",
-                        voiceId: speech.voiceId ?? null,
                         rate: speech.rate ?? 1,
                         volume: speech.volume,
                     });
                 } catch (e) {
-                    setSpeechPreviewError(e instanceof Error ? e.message : "Speech preview failed.");
+                    if (!(e instanceof SpeechError && e.kind === "cancelled")) {
+                        setSpeechPreviewError(e instanceof Error ? e.message : "Speech preview failed.");
+                    }
                 }
             },
             setNewProfileName,
@@ -418,61 +468,36 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             },
             renameActiveProfile: (name: string) => renameProfile(activeProfileId, name),
             deleteProfile,
+            toggleActiveProfileOfflineDesignated: (enabled: boolean) =>
+                setProfileOfflineDesignated(activeProfileId, enabled),
+            recoverLegacyBoard: async (legacyProfileId: string) => {
+                setRecoveringId(legacyProfileId);
+                try {
+                    const res = await recoverLegacyProfile(legacyProfileId);
+                    setRecoveryStatus({
+                        ok: res.ok,
+                        message: res.ok
+                            ? "Recovered legacy board and photos into your account."
+                            : (res.error ?? "Could not recover legacy board."),
+                    });
+                    await refreshOfflineReadiness();
+                } finally {
+                    setRecoveringId(null);
+                }
+            },
             exportBackupJson,
             importBackupJson,
             downloadBackupFile,
             importBackupFile,
             refreshOfflineReadiness,
-            setCloudEmail,
-            setCloudPassword,
-            cloudSignIn: async () => {
-                setCloudBusy(true);
-                setCloudStatus(null);
-                try {
-                    const res = await cloudSyncService.signIn(cloudEmail, cloudPassword);
-                    if (!res.ok || !res.user) {
-                        setCloudStatus({ ok: false, message: res.error ?? "Sign in failed." });
-                        return;
-                    }
-                    setCloudUser(res.user);
-                    setCloudPassword("");
-                    const listRes = await cloudSyncService.listCloudProfiles();
-                    if (listRes.ok) setCloudProfiles(listRes.profiles);
-                    setCloudStatus({ ok: true, message: `Signed in as ${res.user.email ?? res.user.id}.` });
-                } finally {
-                    setCloudBusy(false);
-                }
-            },
-            cloudSignUp: async () => {
-                setCloudBusy(true);
-                setCloudStatus(null);
-                try {
-                    const res = await cloudSyncService.signUp(cloudEmail, cloudPassword);
-                    if (!res.ok) {
-                        setCloudStatus({ ok: false, message: res.error ?? "Sign up failed." });
-                        return;
-                    }
-                    setCloudStatus({
-                        ok: true,
-                        message: res.user
-                            ? `Account created for ${res.user.email ?? res.user.id}.`
-                            : "Check your email to confirm your guardian account.",
-                    });
-                } finally {
-                    setCloudBusy(false);
-                }
-            },
-            cloudSignOut: async () => {
-                await cloudSyncService.signOut();
-                setCloudUser(null);
-                setCloudProfiles([]);
-                setCloudStatus({ ok: true, message: "Signed out. Local board remains available." });
-            },
             publishActiveProfile: async () => {
+                if (!sessionCloudUser) return;
                 setCloudBusy(true);
                 setCloudStatus(null);
+                const editVersionAtStart = localEditVersion;
                 try {
                     const res = await cloudSyncService.publishProfile({
+                        userId: sessionCloudUser.id,
                         localProfileId: activeProfileId,
                         profileName: activeProfileName,
                         cloudProfileId,
@@ -480,14 +505,17 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                         boardData: currentBoardData(),
                     });
                     if (!res.ok || !res.cloudProfileId || !res.revision) {
-                        if (!res.ok && res.cloudProfileId && !cloudProfileId) {
-                            markCloudSynced(activeProfileId, res.cloudProfileId, res.revision ?? 1, true);
+                        if (!res.ok && res.isConflict) {
+                            setStaleConflictProfileId(activeProfileId);
+                            const listRes = await cloudSyncService.listCloudProfiles(sessionCloudUser.id);
+                            if (listRes.ok) setCloudProfiles(listRes.profiles);
                         }
                         setCloudStatus({ ok: false, message: res.error ?? "Publish failed." });
                         return;
                     }
-                    markCloudSynced(activeProfileId, res.cloudProfileId, res.revision);
-                    const listRes = await cloudSyncService.listCloudProfiles();
+                    setStaleConflictProfileId(null);
+                    markCloudSynced(activeProfileId, res.cloudProfileId, res.revision, editVersionAtStart);
+                    const listRes = await cloudSyncService.listCloudProfiles(sessionCloudUser.id);
                     if (listRes.ok) setCloudProfiles(listRes.profiles);
                     setCloudStatus({ ok: true, message: `Published to cloud (revision ${res.revision}).` });
                 } finally {
@@ -495,22 +523,151 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                 }
             },
             downloadCloudProfile: async (profile: ProfileRow) => {
+                if (!sessionCloudUser) return;
                 setCloudBusy(true);
                 setCloudStatus(null);
                 try {
-                    const res = await cloudSyncService.downloadAsLocalCopy(profile);
+                    const res = await cloudSyncService.downloadAsLocalCopy(profile, sessionCloudUser.id);
                     if (!res.ok || !res.doc) {
                         setCloudStatus({ ok: false, message: res.error ?? "Download failed." });
                         return;
                     }
-                    try { importProfileDocument(res.doc); } catch (error) {
+                    const docToImport =
+                        cloudProfileId === profile.id && dirty
+                            ? {
+                                  ...res.doc,
+                                  name: `${res.doc.name} (Cloud rev ${res.doc.cloudRevision ?? 1})`,
+                              }
+                            : res.doc;
+                    try { importProfileDocument(docToImport); } catch (error) {
                         await discardPreparedMedia(res.doc.localProfileId);
                         setCloudStatus({ ok: false, message: error instanceof Error ? error.message : "Could not save downloaded profile." });
                         return;
                     }
-                    setCloudStatus({ ok: true, message: `Downloaded "${res.doc.name}" as a new local profile.` });
+                    setStaleConflictProfileId(null);
+                    setCloudStatus({
+                        ok: true,
+                        message: `Downloaded "${docToImport.name}" as a separate local profile. Your current local draft was kept intact.`,
+                    });
                 } finally {
                     setCloudBusy(false);
+                }
+            },
+            setChildName: (value: string) => {
+                setChildNameState(value);
+                clearChildFieldError("name");
+            },
+            setChildUsername: (value: string) => {
+                setChildUsernameState(value);
+                clearChildFieldError("username");
+            },
+            setChildEmail: (value: string) => {
+                setChildEmailState(value);
+                clearChildFieldError("email");
+            },
+            setChildPassword: (value: string) => {
+                setChildPasswordState(value);
+                clearChildFieldError("password");
+            },
+            setChildConfirmPassword: (value: string) => {
+                setChildConfirmPasswordState(value);
+                clearChildFieldError("confirmPassword");
+            },
+            setChildProfileId: (value: string) => {
+                setSelectedChildProfileIdState(value);
+                clearChildFieldError("profileId");
+            },
+            provisionChildAccount: async () => {
+                if (!sessionCloudUser || childBusy) return;
+                setChildStatus(null);
+                setChildFieldErrors({});
+
+                const validation = validateChildProvisionInput({
+                    name: childName,
+                    username: childUsername,
+                    email: childEmail,
+                    password: childPassword,
+                    confirmPassword: childConfirmPassword,
+                    profileId: childProfileId,
+                });
+                if (!validation.ok) {
+                    setChildFieldErrors(validation.fieldErrors);
+                    setChildStatus({ ok: false, message: validation.error });
+                    return;
+                }
+
+                setChildBusy(true);
+                try {
+                    const res = await provisionChildAccountServerAction(validation.data);
+                    if (!res.ok || !res.child) {
+                        setChildFieldErrors(res.fieldErrors ?? {});
+                        setChildStatus({
+                            ok: false,
+                            message: res.error ?? "Could not create child account.",
+                        });
+                        return;
+                    }
+
+                    const createdChild = res.child;
+                    setChildNameState("");
+                    setChildUsernameState("");
+                    setChildEmailState("");
+                    setChildPasswordState("");
+                    setChildConfirmPasswordState("");
+                    setChildFieldErrors({});
+                    setChildStatus({
+                        ok: true,
+                        message: `Created child account for ${createdChild.name} (username: "${createdChild.username}") linked to "${createdChild.profileName}". They can sign in on the login screen with their username and password.`,
+                    });
+
+                    const listRes = await listProvisionedChildAccountsServerAction().catch(() => ({
+                        ok: false,
+                        children: [] as ProvisionedChildAccount[],
+                    }));
+                    if (listRes.ok) {
+                        setProvisionedChildren(listRes.children);
+                    } else {
+                        setProvisionedChildren(prev => [...prev, createdChild]);
+                    }
+                } catch (err) {
+                    setChildStatus({
+                        ok: false,
+                        message: err instanceof Error ? err.message : "Could not create child account.",
+                    });
+                } finally {
+                    setChildBusy(false);
+                }
+            },
+            removeChildProfileAccess: async (profileId: string, childUserId: string) => {
+                if (!sessionCloudUser || childBusy) return;
+                setChildStatus(null);
+                setChildBusy(true);
+                try {
+                    const res = await removeChildProfileAccessServerAction({
+                        profileId,
+                        childUserId,
+                    });
+                    if (!res.ok) {
+                        setChildStatus({
+                            ok: false,
+                            message: res.error ?? "Could not remove child access.",
+                        });
+                        return;
+                    }
+                    setProvisionedChildren(prev =>
+                        prev.filter(c => !(c.profileId === profileId && c.userId === childUserId)),
+                    );
+                    setChildStatus({
+                        ok: true,
+                        message: "Removed child access from that board profile.",
+                    });
+                } catch (err) {
+                    setChildStatus({
+                        ok: false,
+                        message: err instanceof Error ? err.message : "Could not remove child access.",
+                    });
+                } finally {
+                    setChildBusy(false);
                 }
             },
         },

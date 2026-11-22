@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { BoardProvider } from "@/store/BoardProvider";
 import OfflineServiceWorker from "./components/OfflineServiceWorker";
 import "./globals.css";
 
@@ -16,7 +17,7 @@ export default function RootLayout({
         <html lang="en" className="h-full antialiased">
             <body className="min-h-full flex flex-col">
                 <OfflineServiceWorker />
-                {children}
+                <BoardProvider>{children}</BoardProvider>
             </body>
         </html>
     );

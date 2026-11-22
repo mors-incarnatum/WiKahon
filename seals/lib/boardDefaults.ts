@@ -13,7 +13,16 @@ import {
     type CellKey,
     type CellPlacement,
 } from "@/lib/board";
-import { DEFAULT_FEATURE_FLAGS, isValidMediaId, type BoardData } from "@/models/boardData";
+import { DEFAULT_FEATURE_FLAGS, type BoardData } from "@/models/boardData";
+import {
+    AccessConfigSchema,
+    ChatMessageSchema,
+    FeatureFlagsSchema,
+    SentenceTokenSchema,
+    SpeechConfigSchema,
+    TileAppearanceSchema,
+    TileSchema,
+} from "@/lib/boardSchemas";
 
 export function initialData(): BoardData {
     const tiles: Record<string, Tile> = {};
@@ -70,14 +79,9 @@ export function initialData(): BoardData {
             volume: 1,
             speakOnTap: true,
             autoClear: "off",
-            provider: "cloud-puter",
-            voiceId: "Andres",
-            languageTag: "es-MX",
             rate: 1,
         },
         accessConfig: {
-            editPin: null,
-            pinVerifier: null,
             longPressToEdit: true,
             holdDurationMs: 650,
             moveTolerancePx: 12,
@@ -108,10 +112,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function isValidColorKey(value: unknown): value is ColorKey {
     return typeof value === "string" && VALID_COLOR_KEYS.has(value);
-}
-
-function nonNegFinite(value: unknown, fallback: number): number {
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function sanitizeGrid(value: Record<string, unknown>, fallback: GridConfig): GridConfig {
@@ -178,29 +178,65 @@ function sanitizeBoards(rawBoards: Record<string, unknown>, fallbackGrid: GridCo
     return boards;
 }
 
-function sanitizeRecordMediaId(entry: Record<string, unknown>): Record<string, unknown> {
-    const cloned = structuredClone(entry);
-    if ("mediaId" in cloned && cloned.mediaId !== undefined && !isValidMediaId(cloned.mediaId)) {
-        cloned.mediaId = null;
-    }
-    return cloned;
-}
-
-function sanitizeTiles(rawTiles: Record<string, unknown>): Record<string, Tile> {
+function sanitizeTiles(
+    rawTiles: Record<string, unknown>,
+    defaultTiles: Record<string, Tile> = initialData().tiles,
+): Record<string, Tile> {
     const tiles: Record<string, Tile> = {};
     for (const [key, rawTile] of Object.entries(rawTiles)) {
-        if (key === "__proto__" || !isPlainObject(rawTile)) continue;
-        tiles[key] = sanitizeRecordMediaId(rawTile) as unknown as Tile;
+        if (key === "__proto__") continue;
+        const parsed = TileSchema.safeParse(rawTile);
+        if (parsed.success) {
+            tiles[key] = parsed.data;
+        } else if (Object.prototype.hasOwnProperty.call(defaultTiles, key)) {
+            tiles[key] = defaultTiles[key];
+        }
     }
     return tiles;
 }
 
-function clonePlainObject<T>(value: unknown): Partial<T> {
-    return isPlainObject(value) ? (structuredClone(value) as Partial<T>) : {};
+function mergeValidFields<T extends object>(
+    defaultsObj: T,
+    rawObj: unknown,
+    shape: {
+        [K in keyof T]: {
+            safeParse: (value: unknown) => { success: true; data: T[K] } | { success: false };
+        };
+    },
+): T {
+    const result = { ...defaultsObj };
+    if (!isPlainObject(rawObj)) return result;
+    for (const key of Object.keys(shape) as (keyof T & string)[]) {
+        if (Object.prototype.hasOwnProperty.call(rawObj, key)) {
+            const parsed = shape[key].safeParse(rawObj[key]);
+            if (parsed.success) {
+                result[key] = parsed.data;
+            }
+        }
+    }
+    return result;
 }
 
-function currentTileDimension(value: unknown): number {
-    return typeof value === "number" && Number.isFinite(value) ? Math.max(1, Math.min(100, Math.round(value))) : 50;
+function sanitizeExperimentalData(rawExp: unknown): BoardData["experimentalData"] | undefined {
+    if (!isPlainObject(rawExp)) return undefined;
+    const result: NonNullable<BoardData["experimentalData"]> = {};
+    if (Array.isArray(rawExp.scribbleDrafts)) {
+        result.scribbleDrafts = rawExp.scribbleDrafts.flatMap(item =>
+            typeof item === "string" ? [item] : [],
+        );
+    }
+    if (Array.isArray(rawExp.chatMessages)) {
+        result.chatMessages = rawExp.chatMessages.flatMap(item => {
+            const parsed = ChatMessageSchema.safeParse(item);
+            return parsed.success ? [parsed.data] : [];
+        });
+    }
+    if (Array.isArray(rawExp.pinnedTileIds)) {
+        result.pinnedTileIds = rawExp.pinnedTileIds.flatMap(item =>
+            typeof item === "string" && item.length > 0 ? [item] : [],
+        );
+    }
+    return result;
 }
 
 export function sanitizeBoardData(raw: unknown): BoardData | null {
@@ -209,17 +245,10 @@ export function sanitizeBoardData(raw: unknown): BoardData | null {
 
     const defaults = initialData();
     const rawAccess = isPlainObject(raw.accessConfig) ? raw.accessConfig : {};
-    const rawAppearance = clonePlainObject<BoardData["tileAppearance"]>(raw.tileAppearance);
-    const rawPinVerifier = rawAccess.pinVerifier;
-    const pinVerifier =
-        isPlainObject(rawPinVerifier) &&
-        typeof rawPinVerifier.salt === "string" &&
-        typeof rawPinVerifier.hash === "string"
-            ? { salt: rawPinVerifier.salt, hash: rawPinVerifier.hash }
-            : null;
+    const experimentalData = sanitizeExperimentalData(raw.experimentalData);
 
     return {
-        tiles: sanitizeTiles(raw.tiles),
+        tiles: sanitizeTiles(raw.tiles, defaults.tiles),
         boards: sanitizeBoards(raw.boards, defaults.gridConfig),
         catalogOrder: Array.isArray(raw.catalogOrder)
             ? raw.catalogOrder.filter((id): id is string => typeof id === "string")
@@ -228,40 +257,32 @@ export function sanitizeBoardData(raw: unknown): BoardData | null {
             ? sanitizeGrid(raw.gridConfig, defaults.gridConfig)
             : defaults.gridConfig,
         layoutMode: raw.layoutMode === "automatic" ? "automatic" : "manual",
-        tileAppearance: {
-            ...defaults.tileAppearance,
-            ...rawAppearance,
-            tileWidth: currentTileDimension(rawAppearance.tileWidth),
-            tileHeight: currentTileDimension(rawAppearance.tileHeight),
-        },
-        speechConfig: {
-            ...defaults.speechConfig,
-            ...clonePlainObject<BoardData["speechConfig"]>(raw.speechConfig),
-        },
+        tileAppearance: mergeValidFields(defaults.tileAppearance, raw.tileAppearance, TileAppearanceSchema.shape),
+        speechConfig: mergeValidFields(defaults.speechConfig, raw.speechConfig, SpeechConfigSchema.shape),
         accessConfig: {
-            ...defaults.accessConfig,
-            ...clonePlainObject<BoardData["accessConfig"]>(raw.accessConfig),
-            editPin: null,
-            pinVerifier,
-            longPressToEdit:
-                typeof rawAccess.longPressToEdit === "boolean"
-                    ? rawAccess.longPressToEdit
-                    : defaults.accessConfig.longPressToEdit,
-            holdDurationMs: nonNegFinite(rawAccess.holdDurationMs, defaults.accessConfig.holdDurationMs),
-            moveTolerancePx: nonNegFinite(rawAccess.moveTolerancePx, defaults.accessConfig.moveTolerancePx),
-            swipeThresholdPx: nonNegFinite(rawAccess.swipeThresholdPx, defaults.accessConfig.swipeThresholdPx),
+            ...mergeValidFields(
+                {
+                    longPressToEdit: defaults.accessConfig.longPressToEdit,
+                    holdDurationMs: defaults.accessConfig.holdDurationMs,
+                    moveTolerancePx: defaults.accessConfig.moveTolerancePx,
+                    swipeThresholdPx: defaults.accessConfig.swipeThresholdPx,
+                },
+                rawAccess,
+                {
+                    longPressToEdit: AccessConfigSchema.shape.longPressToEdit,
+                    holdDurationMs: AccessConfigSchema.shape.holdDurationMs,
+                    moveTolerancePx: AccessConfigSchema.shape.moveTolerancePx,
+                    swipeThresholdPx: AccessConfigSchema.shape.swipeThresholdPx,
+                },
+            ),
         },
-        featureFlags: {
-            ...DEFAULT_FEATURE_FLAGS,
-            ...clonePlainObject<BoardData["featureFlags"]>(raw.featureFlags),
-        },
-        ...(isPlainObject(raw.experimentalData)
-            ? { experimentalData: structuredClone(raw.experimentalData) as BoardData["experimentalData"] }
-            : {}),
+        featureFlags: mergeValidFields(defaults.featureFlags, raw.featureFlags, FeatureFlagsSchema.shape),
+        ...(experimentalData !== undefined ? { experimentalData } : {}),
         sentence: Array.isArray(raw.sentence)
-            ? raw.sentence
-                  .filter(isPlainObject)
-                  .map(token => sanitizeRecordMediaId(token) as unknown as BoardData["sentence"][number])
+            ? raw.sentence.flatMap(token => {
+                  const parsed = SentenceTokenSchema.safeParse(token);
+                  return parsed.success ? [parsed.data] : [];
+              })
             : [],
     };
 }

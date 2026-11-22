@@ -55,6 +55,7 @@ export function useCatalogManagerViewModel() {
             reset,
             select: (id: string) => {
                 const b = boards[id];
+                if (!b) return;
                 setSelected(id);
                 setName(b.name);
                 setShortName(b.shortName);

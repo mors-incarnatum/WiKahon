@@ -8,7 +8,10 @@ export interface LocalProfileDocument {
     name: string;
     cloudProfileId?: string | null;
     cloudRevision?: number | null;
-    dirty?: boolean;
+    ownerUserId?: string | null;
+    dirty?: boolean; // True when there are unpublished cloud-publishable edits
+    localEditVersion?: number; // Monotonic counter incremented on cloud-publishable edits
+    lastPublishedEditVersion?: number; // Edit version last confirmed published to cloud
     boardData: BoardData;
 }
 
@@ -16,6 +19,19 @@ export interface ProfileSummary {
     localProfileId: string;
     name: string;
     cloudProfileId?: string | null;
+    ownerUserId?: string | null;
+}
+
+export interface OfflineDesignatedProfileSummary {
+    localProfileId: string;
+    name: string;
+    ownerUserId: string;
+}
+
+export interface RecoverableLegacyProfileSummary {
+    localProfileId: string;
+    name: string;
+    cloudProfileId: string | null;
 }
 
 export interface ActiveProfileIndex {

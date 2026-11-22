@@ -1,64 +1,27 @@
 "use client";
 
-import type { DummyAccount } from "@/models/auth";
-import { useAuthViewModel } from "@/viewmodels/useAuthViewModel";
+import Link from "next/link";
+import { type AuthMode, type GuardianSignupRole, useAuthViewModel } from "@/viewmodels/useAuthViewModel";
 
-function AccountCard({
-    account,
-    roleLabel,
-    onQuickLogin,
-    onFill,
-}: {
-    account: DummyAccount;
-    roleLabel: string;
-    onQuickLogin: (userId: string) => void;
-    onFill: (account: DummyAccount) => void;
-}) {
-    const { user } = account;
-
+function FieldErrors({ errors }: { errors?: string[] }) {
+    if (!errors || errors.length === 0) return null;
     return (
-        <div className="border border-slate-200 rounded-lg p-3 bg-slate-50 flex flex-col gap-2">
-            <div>
-                <div className="font-semibold text-sm text-slate-900">
-                    {user.name} ({roleLabel})
-                </div>
-                <div className="text-xs text-slate-600 mt-0.5">
-                    Username: <code>{account.username}</code>
-                    {user.email && (
-                        <>
-                            {" "}
-                            · Email: <code>{user.email}</code>
-                        </>
-                    )}{" "}
-                    · Password: <code>{account.password}</code>
-                </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-                <button
-                    type="button"
-                    className="primary px-3 py-1.5 text-xs font-semibold rounded-md border"
-                    onClick={() => onQuickLogin(user.id)}
-                >
-                    Log in as {user.name}
-                </button>
-                <button
-                    type="button"
-                    className="px-3 py-1.5 text-xs font-semibold rounded-md border border-slate-300 bg-white text-slate-800 hover:bg-slate-100"
-                    onClick={() => onFill(account)}
-                >
-                    Fill credentials
-                </button>
-            </div>
-        </div>
+        <ul role="alert" className="mt-1 space-y-0.5 text-xs text-rose-700 font-normal">
+            {errors.map(err => (
+                <li key={err}>{err}</li>
+            ))}
+        </ul>
     );
 }
 
-export default function LoginView() {
-    const { state: s, actions: a } = useAuthViewModel();
+export default function LoginView({ initialMode = "login" }: { initialMode?: AuthMode } = {}) {
+    const { state: s, actions: a } = useAuthViewModel(initialMode);
+
+    if (s.currentUser) return null;
 
     return (
         <div className="min-h-dvh flex flex-col bg-slate-200 text-slate-900">
-            <header className="bg-white border-b border-slate-300 px-4 py-3 flex items-center justify-between">
+            <header className="bg-white border-b border-slate-300 px-4 py-3 flex flex-wrap items-center justify-between gap-2">
                 <div className="brand">
                     <b>W</b> WiKahon
                 </div>
@@ -68,47 +31,216 @@ export default function LoginView() {
             </header>
 
             <main className="flex-1 flex items-center justify-center p-4">
-                <div className="w-full max-w-4xl grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] items-start">
-                    <section
-                        aria-labelledby="login-heading"
-                        className="bg-white border border-slate-300 rounded-xl p-6 shadow-sm"
-                    >
-                        <h1 id="login-heading" className="text-xl font-bold text-slate-900">
-                            Sign in to WiKahon
-                        </h1>
-                        <p className="text-sm text-slate-600 mt-1">
-                            Log in as a child to use the essential AAC board, or as a guardian for full settings access.
-                        </p>
+                <section
+                    aria-labelledby="login-heading"
+                    className="w-full max-w-md bg-white border border-slate-300 rounded-xl p-6 shadow-sm"
+                >
+                    <div className="flex gap-2 mb-4" role="tablist" aria-label="Authentication mode">
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={s.mode === "login"}
+                            onClick={() => a.setMode("login")}
+                            className={`flex-1 py-2 px-3 text-sm font-semibold rounded-md border ${
+                                s.mode === "login"
+                                    ? "primary"
+                                    : "border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100"
+                            }`}
+                        >
+                            Sign In
+                        </button>
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={s.mode === "signup"}
+                            onClick={() => a.setMode("signup")}
+                            className={`flex-1 py-2 px-3 text-sm font-semibold rounded-md border ${
+                                s.mode === "signup"
+                                    ? "primary"
+                                    : "border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100"
+                            }`}
+                        >
+                            Create Account
+                        </button>
+                    </div>
 
+                    <h1 id="login-heading" className="text-xl font-bold text-slate-900">
+                        {s.mode === "login" ? "Sign in to WiKahon" : "Create a Guardian Account"}
+                    </h1>
+                    <p className="text-sm text-slate-600 mt-1">
+                        {s.mode === "login"
+                            ? "Sign in with your email or username and password to sync boards and access your role."
+                            : "Create a Parent or Caregiver account to manage AAC boards and cloud sync. Child accounts are provisioned by a guardian or can use Offline Child Mode below."}
+                    </p>
+
+                    {s.infoMessage && (
+                        <p
+                            role="status"
+                            className="mt-4 text-sm text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2"
+                        >
+                            {s.infoMessage}
+                        </p>
+                    )}
+
+                    {s.mode === "login" ? (
                         <form
+                            noValidate
                             className="mt-5 space-y-4"
                             onSubmit={e => {
                                 e.preventDefault();
-                                a.login();
+                                void a.login();
                             }}
                         >
                             <label className="block text-sm font-semibold text-slate-800">
-                                Username or email
+                                Email or Username
                                 <input
                                     type="text"
+                                    name="identifier"
                                     autoComplete="username"
                                     value={s.identifier}
+                                    aria-invalid={Boolean(s.fieldErrors.identifier?.length)}
                                     onChange={e => a.setIdentifier(e.target.value)}
-                                    placeholder="e.g., kyle or lily"
+                                    placeholder="name@example.com or username"
                                     className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
                                 />
+                                <FieldErrors errors={s.fieldErrors.identifier} />
                             </label>
 
                             <label className="block text-sm font-semibold text-slate-800">
-                                Password / PIN
+                                Password
                                 <input
                                     type="password"
+                                    name="password"
                                     autoComplete="current-password"
                                     value={s.password}
+                                    aria-invalid={Boolean(s.fieldErrors.password?.length)}
                                     onChange={e => a.setPassword(e.target.value)}
-                                    placeholder="Enter password or PIN"
+                                    placeholder="Enter password"
                                     className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
                                 />
+                                <FieldErrors errors={s.fieldErrors.password} />
+                            </label>
+
+                            <div className="text-right">
+                                <Link href="/forgot-password" className="text-sm font-semibold text-blue-700 hover:underline">
+                                    Forgot password?
+                                </Link>
+                            </div>
+
+                            {s.error && (
+                                <p
+                                    role="alert"
+                                    className="text-sm text-rose-800 bg-rose-50 border border-rose-200 rounded-md px-3 py-2"
+                                >
+                                    {s.error}
+                                </p>
+                            )}
+
+                            <button
+                                type="submit"
+                                disabled={s.isSubmitting}
+                                className="primary w-full py-2.5 px-4 rounded-md font-semibold text-sm border"
+                            >
+                                {s.isSubmitting ? "Signing in…" : "Sign in"}
+                            </button>
+                        </form>
+                    ) : (
+                        <form
+                            noValidate
+                            className="mt-5 space-y-3"
+                            onSubmit={e => {
+                                e.preventDefault();
+                                void a.signup();
+                            }}
+                        >
+                            <label className="block text-sm font-semibold text-slate-800">
+                                Full name
+                                <input
+                                    type="text"
+                                    name="name"
+                                    autoComplete="name"
+                                    value={s.name}
+                                    aria-invalid={Boolean(s.fieldErrors.name?.length)}
+                                    onChange={e => a.setName(e.target.value)}
+                                    placeholder="e.g., Lily Santos"
+                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
+                                />
+                                <FieldErrors errors={s.fieldErrors.name} />
+                            </label>
+
+                            <label className="block text-sm font-semibold text-slate-800">
+                                Username
+                                <input
+                                    type="text"
+                                    name="username"
+                                    autoComplete="username"
+                                    value={s.username}
+                                    aria-invalid={Boolean(s.fieldErrors.username?.length)}
+                                    onChange={e => a.setUsername(e.target.value)}
+                                    placeholder="e.g., lily"
+                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
+                                />
+                                <FieldErrors errors={s.fieldErrors.username} />
+                            </label>
+
+                            <label className="block text-sm font-semibold text-slate-800">
+                                Email
+                                <input
+                                    type="email"
+                                    name="email"
+                                    autoComplete="email"
+                                    value={s.email}
+                                    aria-invalid={Boolean(s.fieldErrors.email?.length)}
+                                    onChange={e => a.setEmail(e.target.value)}
+                                    placeholder="guardian@example.com"
+                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
+                                />
+                                <FieldErrors errors={s.fieldErrors.email} />
+                            </label>
+
+                            <label className="block text-sm font-semibold text-slate-800">
+                                Guardian Role
+                                <select
+                                    name="role"
+                                    value={s.role}
+                                    aria-invalid={Boolean(s.fieldErrors.role?.length)}
+                                    onChange={e => a.setRole(e.target.value as GuardianSignupRole)}
+                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
+                                >
+                                    <option value="CAREGIVER">Caregiver</option>
+                                    <option value="PARENT">Parent</option>
+                                </select>
+                                <FieldErrors errors={s.fieldErrors.role} />
+                            </label>
+
+                            <label className="block text-sm font-semibold text-slate-800">
+                                Password (min 8 chars, letter & number)
+                                <input
+                                    type="password"
+                                    name="password"
+                                    autoComplete="new-password"
+                                    value={s.password}
+                                    aria-invalid={Boolean(s.fieldErrors.password?.length)}
+                                    onChange={e => a.setPassword(e.target.value)}
+                                    placeholder="Enter password"
+                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
+                                />
+                                <FieldErrors errors={s.fieldErrors.password} />
+                            </label>
+
+                            <label className="block text-sm font-semibold text-slate-800">
+                                Confirm password
+                                <input
+                                    type="password"
+                                    name="confirmPassword"
+                                    autoComplete="new-password"
+                                    value={s.confirmPassword}
+                                    aria-invalid={Boolean(s.fieldErrors.confirmPassword?.length)}
+                                    onChange={e => a.setConfirmPassword(e.target.value)}
+                                    placeholder="Re-enter password"
+                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
+                                />
+                                <FieldErrors errors={s.fieldErrors.confirmPassword} />
                             </label>
 
                             {s.error && (
@@ -122,61 +254,20 @@ export default function LoginView() {
 
                             <button
                                 type="submit"
+                                disabled={s.isSubmitting}
                                 className="primary w-full py-2.5 px-4 rounded-md font-semibold text-sm border"
                             >
-                                Sign in
+                                {s.isSubmitting ? "Creating account…" : "Create account"}
                             </button>
                         </form>
-                    </section>
+                    )}
 
-                    <div className="space-y-4">
-                        <section
-                            aria-labelledby="guardian-accounts-heading"
-                            className="bg-white border border-slate-300 rounded-xl p-5 shadow-sm"
-                        >
-                            <h2 id="guardian-accounts-heading" className="text-base font-bold text-slate-900">
-                                Guardian Account
-                            </h2>
-                            <p className="text-xs text-slate-600 mt-0.5 mb-3">
-                                Full unrestricted access to every toggle, layout setting, catalog, and tile editor.
-                            </p>
-                            <div className="grid gap-3">
-                                {s.guardianAccounts.map(account => (
-                                    <AccountCard
-                                        key={account.user.id}
-                                        account={account}
-                                        roleLabel="Guardian"
-                                        onQuickLogin={a.quickLogin}
-                                        onFill={a.fillAccount}
-                                    />
-                                ))}
-                            </div>
-                        </section>
-
-                        <section
-                            aria-labelledby="child-accounts-heading"
-                            className="bg-white border border-slate-300 rounded-xl p-5 shadow-sm"
-                        >
-                            <h2 id="child-accounts-heading" className="text-base font-bold text-slate-900">
-                                Child Account
-                            </h2>
-                            <p className="text-xs text-slate-600 mt-0.5 mb-3">
-                                Essential AAC communication board only. Reflects all guardian settings and toggles.
-                            </p>
-                            <div className="grid gap-3">
-                                {s.childAccounts.map(account => (
-                                    <AccountCard
-                                        key={account.user.id}
-                                        account={account}
-                                        roleLabel="Child"
-                                        onQuickLogin={a.quickLogin}
-                                        onFill={a.fillAccount}
-                                    />
-                                ))}
-                            </div>
-                        </section>
+                    <div className="mt-5 pt-4 border-t border-slate-200 space-y-3">
+                        <p className="text-xs text-slate-600 text-center">
+                            Zod Schema Validation · Supabase Auth Session · Offline Local AAC Mode
+                        </p>
                     </div>
-                </div>
+                </section>
             </main>
         </div>
     );

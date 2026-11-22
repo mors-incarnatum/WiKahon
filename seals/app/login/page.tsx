@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import LoginView from "@/app/components/LoginView";
 
 export default function LoginPage() {
-    redirect("/board");
+    return <LoginView initialMode="login" />;
 }

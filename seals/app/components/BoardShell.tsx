@@ -8,16 +8,12 @@ import SentenceStrip from "./SentenceStrip";
 import BoardSettings from "./BoardSettings";
 import CatalogManager from "./CatalogManager";
 import CategoryWheel from "./CategoryWheel";
-import ScribblePracticeModal from "./ScribblePracticeModal";
-import ParentChatModal from "./ParentChatModal";
-import LoginView from "./LoginView";
-import Modal from "./Modal";
 
 export default function BoardShell({ children }: { children: React.ReactNode }) {
     const vm = useBoardShellViewModel();
 
     if (!vm.state.currentUser) {
-        return <LoginView />;
+        return null;
     }
 
     return (
@@ -76,9 +72,23 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                 <button
                                     type="button"
                                     aria-pressed={vm.state.isChatOpen}
+                                    aria-label={
+                                        vm.state.unreadChatCount > 0
+                                            ? `Chat (${vm.state.unreadChatCount} unread ${vm.state.unreadChatCount === 1 ? "message" : "messages"})`
+                                            : "Chat"
+                                    }
                                     onClick={vm.actions.toggleChat}
+                                    className="inline-flex items-center gap-1.5"
                                 >
                                     💬 Chat
+                                    {vm.state.unreadChatCount > 0 && (
+                                        <span
+                                            aria-hidden="true"
+                                            className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-rose-600 text-white text-[11px] font-bold leading-none"
+                                        >
+                                            {vm.state.unreadChatCount > 99 ? "99+" : vm.state.unreadChatCount}
+                                        </span>
+                                    )}
                                 </button>
                             )}
                             {vm.state.isGuardian && (
@@ -168,13 +178,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                         onContextMenu={vm.actions.onContextMenu}
                         onKeyDown={vm.actions.onKeyDown}
                     >
-                        {vm.state.isChatOpen ? (
-                            <ParentChatModal onClose={() => vm.actions.setPanel(null)} />
-                        ) : vm.state.isScribbleOpen ? (
-                            <ScribblePracticeModal onClose={() => vm.actions.setPanel(null)} />
-                        ) : (
-                            children
-                        )}
+                        {children}
                     </main>
 
                     {vm.state.isGuardian && !vm.state.isChatOpen && !vm.state.isScribbleOpen && (
@@ -224,31 +228,6 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                     )}
                     {vm.state.isGuardian && vm.state.panel === "catalogs" && (
                         <CatalogManager onClose={() => vm.actions.setPanel(null)} />
-                    )}
-                    {vm.state.isGuardian && vm.edit.state.pinDialog && (
-                        <Modal
-                            label="Unlock edit mode"
-                            onClose={vm.edit.actions.closePin}
-                            className="editor-modal small-modal"
-                        >
-                            <h2>Unlock edit mode</h2>
-                            <label>
-                                PIN
-                                <input
-                                    type="password"
-                                    inputMode="numeric"
-                                    value={vm.edit.state.pin}
-                                    onChange={e => vm.edit.actions.setPin(e.target.value)}
-                                />
-                            </label>
-                            <p role="alert">{vm.edit.state.error}</p>
-                            <button type="button" onClick={() => void vm.edit.actions.unlock()}>
-                                Unlock
-                            </button>
-                            <button type="button" onClick={vm.edit.actions.closePin}>
-                                Cancel
-                            </button>
-                        </Modal>
                     )}
                 </div>
             </EditContext.Provider>

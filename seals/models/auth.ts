@@ -1,66 +1,44 @@
 import type { User, UserRole } from "./user";
-import type { Parent } from "./parent";
-import type { Caregiver } from "./caregiver";
-import type { Child } from "./child";
-
-export interface DummyAccount {
-    user: Parent | Caregiver | Child;
-    username: string;
-    aliases?: readonly string[];
-    password: string;
-}
 
 export interface AuthSession {
     user: User;
     username: string;
+    expiresAt?: string;
+    source?: "supabase" | "local-child";
 }
 
-export const DUMMY_ACCOUNTS: readonly DummyAccount[] = [
-    {
-        user: {
-            id: "guardian-kyle",
-            name: "Kyle",
-            email: "kyle@wikahon.local",
-            role: "CAREGIVER",
-        },
-        username: "kyle",
-        aliases: ["guardian"],
-        password: "kyle123",
-    },
-    {
-        user: {
-            id: "child-lily",
-            name: "Lily",
-            email: null,
-            role: "CHILD",
-        },
-        username: "lily",
-        aliases: ["child"],
-        password: "1234",
-    },
-];
+export interface ProvisionedChildAccount {
+    userId: string;
+    username: string;
+    name: string;
+    profileId: string;
+    profileName: string;
+}
 
+/** Built-in offline AAC session used when continuing as Child without cloud sign-in. */
+export const LOCAL_CHILD_SESSION: AuthSession = {
+    user: {
+        id: "local-child-lily",
+        name: "Lily",
+        email: null,
+        role: "CHILD",
+    },
+    username: "lily",
+    source: "local-child",
+};
+
+/** Returns true when the role has guardian editing permissions. */
 export function isGuardianRole(role: UserRole | null | undefined): boolean {
     return role === "PARENT" || role === "CAREGIVER";
 }
 
-export function findDummyAccountByCredentials(
-    identifier: string,
-    password: string,
-): DummyAccount | null {
-    const normalized = identifier.trim().toLowerCase();
-    if (!normalized || !password) return null;
-    return (
-        DUMMY_ACCOUNTS.find(
-            account =>
-                (account.username.toLowerCase() === normalized ||
-                    account.aliases?.some(alias => alias.toLowerCase() === normalized) ||
-                    account.user.email?.toLowerCase() === normalized) &&
-                account.password === password,
-        ) ?? null
-    );
-}
-
-export function findDummyAccountById(userId: string): DummyAccount | null {
-    return DUMMY_ACCOUNTS.find(account => account.user.id === userId) ?? null;
+/** Normalizes a server-supplied role value to a valid UserRole, defaulting to "CHILD". */
+export function parseServerRole(value: unknown): UserRole {
+    if (typeof value === "string") {
+        const normalized = value.trim().toUpperCase();
+        if (normalized === "PARENT" || normalized === "CAREGIVER" || normalized === "CHILD") {
+            return normalized;
+        }
+    }
+    return "CHILD";
 }

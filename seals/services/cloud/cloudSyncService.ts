@@ -4,14 +4,27 @@ import type { BoardData } from "@/models/boardData";
 import { PROFILE_SCHEMA_VERSION, type LocalProfileDocument } from "@/models/profile";
 import { getSupabaseBrowserClient, type BoardSupabaseClient } from "@/models/supabase/client";
 import { SupabaseBoardRepository, type IBoardRepository } from "@/models/supabase/boardRepository";
-import type { ProfileRow } from "@/models/supabase/database.types";
-import { tileToWord, wordToTile } from "@/models/supabase/mappers";
+import type { Json, ProfileRow } from "@/models/supabase/database.types";
+import {
+    boardToRow,
+    settingsToRow,
+    tileToRow,
+    tileToWord,
+    wordToRow,
+    wordToTile,
+} from "@/models/supabase/mappers";
 import type { Word } from "@/models/word";
 import { discardPreparedMedia, mediaRepository, type IMediaRepository } from "@/services/storage/mediaRepository";
 
 export interface CloudUser {
     id: string;
     email: string | null;
+}
+
+function isMissingPublishRpcError(error: { code?: string; message?: string }): boolean {
+    if (error.code === "PGRST202") return true;
+    const message = error.message ?? "";
+    return message.includes("Could not find the function public.publish_profile_snapshot");
 }
 
 export class CloudSyncService {
@@ -34,41 +47,18 @@ export class CloudSyncService {
         return { id: data.user.id, email: data.user.email ?? null };
     }
 
-    async signIn(email: string, password: string): Promise<{ ok: boolean; user?: CloudUser; error?: string }> {
-        const client = this.getClient();
-        if (!client) return { ok: false, error: "Supabase is not configured in environment variables." };
-        const { data, error } = await client.auth.signInWithPassword({ email, password });
-        if (error || !data.user) {
-            return { ok: false, error: error?.message ?? "Sign in failed." };
-        }
-        return { ok: true, user: { id: data.user.id, email: data.user.email ?? null } };
-    }
-
-    async signUp(email: string, password: string): Promise<{ ok: boolean; user?: CloudUser; error?: string }> {
-        const client = this.getClient();
-        if (!client) return { ok: false, error: "Supabase is not configured in environment variables." };
-        const { data, error } = await client.auth.signUp({ email, password });
-        if (error) {
-            return { ok: false, error: error.message };
-        }
-        if (!data.user) {
-            return { ok: true };
-        }
-        return { ok: true, user: { id: data.user.id, email: data.user.email ?? null } };
-    }
-
-    async signOut(): Promise<void> {
-        const client = this.getClient();
-        if (!client) return;
-        await client.auth.signOut();
-    }
-
-    async listCloudProfiles(): Promise<{ ok: boolean; profiles: ProfileRow[]; error?: string }> {
+    async listCloudProfiles(userId: string): Promise<{ ok: boolean; profiles: ProfileRow[]; error?: string }> {
         const client = this.getClient();
         if (!client) return { ok: false, profiles: [], error: "Supabase is not configured." };
         try {
+            if ((await this.getCurrentUser())?.id !== userId) {
+                return { ok: false, profiles: [], error: "The signed-in account changed." };
+            }
             const repo = this.makeRepo(client);
             const profiles = await repo.listProfiles();
+            if ((await this.getCurrentUser())?.id !== userId) {
+                return { ok: false, profiles: [], error: "The signed-in account changed." };
+            }
             return { ok: true, profiles };
         } catch (error) {
             return {
@@ -80,26 +70,29 @@ export class CloudSyncService {
     }
 
     async publishProfile(params: {
+        userId: string;
         localProfileId: string;
         profileName: string;
         cloudProfileId: string | null;
         expectedRevision: number | null;
         boardData: BoardData;
-    }): Promise<{ ok: boolean; cloudProfileId?: string; revision?: number; error?: string }> {
+    }): Promise<{ ok: boolean; cloudProfileId?: string; revision?: number; isConflict?: boolean; error?: string }> {
         const client = this.getClient();
         if (!client) return { ok: false, error: "Supabase is not configured." };
         const user = await this.getCurrentUser();
-        if (!user) return { ok: false, error: "Please sign in as a guardian before publishing." };
+        if (user?.id !== params.userId) return { ok: false, error: "The signed-in account changed." };
 
         const repo = this.makeRepo(client);
         let targetCloudId = params.cloudProfileId;
         let expectedRev = params.expectedRevision;
+        let snapshotCommitted = false;
         try {
             if (!targetCloudId) {
-                const created = await repo.createProfile(params.profileName);
+                const created = await repo.createProfile(params.profileName, user.id);
                 targetCloudId = created.id;
                 expectedRev = created.revision ?? 1;
             }
+            const profileId = targetCloudId;
 
             // 1. Publish referenced media first to the private profile-scoped bucket.
             const mediaIds = new Set<string>();
@@ -109,7 +102,7 @@ export class CloudSyncService {
             for (const mediaId of mediaIds) {
                 const record = await this.mediaRepo.loadMedia(params.localProfileId, mediaId);
                 if (!record) throw new Error(`Cannot publish: missing photo ${mediaId}.`);
-                await repo.uploadProfileMedia(targetCloudId, mediaId, record.blob, record.mimeType);
+                await repo.uploadProfileMedia(profileId, mediaId, record.blob, record.mimeType);
             }
 
             // 2. Normalize boards, words (public.words), and folder tiles (public.tiles).
@@ -127,27 +120,7 @@ export class CloudSyncService {
                 }
             }
 
-            // 3. Fetch existing remote rows to determine stale IDs.
-            const [existingBoards, existingTiles, existingWords] = await Promise.all([
-                repo.listBoards(targetCloudId),
-                repo.listTiles(targetCloudId),
-                repo.listWords(targetCloudId),
-            ]);
-            const wordIdSet = new Set(words.map(w => w.id));
-            const folderIdSet = new Set(folderTiles.map(t => t.id));
-            const staleWordIds = existingWords.map(w => w.id).filter(id => !wordIdSet.has(id));
-            const staleTileIds = existingTiles.map(t => t.id).filter(id => !folderIdSet.has(id));
-            const staleBoardIds = existingBoards.map(b => b.id).filter(id => !boardIds.has(id));
-
-            // 4. Sync tables in foreign-key-safe order.
-            await repo.saveBoards(targetCloudId, boards);
-            await Promise.all([
-                repo.deleteTiles(targetCloudId, staleTileIds),
-                repo.deleteWords(targetCloudId, staleWordIds),
-            ]);
-            await Promise.all([repo.saveWords(targetCloudId, words), repo.saveTiles(targetCloudId, folderTiles)]);
-            await repo.deleteBoards(targetCloudId, staleBoardIds);
-            await repo.saveSettings(targetCloudId, {
+            const cloudSettings = {
                 catalogOrder: params.boardData.catalogOrder,
                 gridConfig: params.boardData.gridConfig,
                 layoutMode: params.boardData.layoutMode,
@@ -160,21 +133,68 @@ export class CloudSyncService {
                     swipeThresholdPx: params.boardData.accessConfig.swipeThresholdPx,
                 },
                 featureFlags: params.boardData.featureFlags,
+            };
+            const settingsRow = settingsToRow(profileId, cloudSettings);
+
+            // 3. Require atomic server-side snapshot publication.
+            const { data: rpcRevision, error: rpcError } = await client.rpc("publish_profile_snapshot", {
+                p_profile_id: profileId,
+                p_expected_revision: expectedRev ?? null,
+                p_boards: boards.map(b => boardToRow(profileId, b)) as unknown as Json,
+                p_tiles: folderTiles.map(t => tileToRow(profileId, t)) as unknown as Json,
+                p_words: words.map(w => wordToRow(profileId, w)) as unknown as Json,
+                p_settings: settingsRow as unknown as Json,
             });
 
-            // 5. Clean up orphaned storage objects in profile-media.
-            const remoteMediaIds = await repo.listProfileMedia(targetCloudId);
-            const orphanedMediaIds = remoteMediaIds.filter(id => !mediaIds.has(id));
-            if (orphanedMediaIds.length > 0) {
-                await repo.removeProfileMedia(targetCloudId, orphanedMediaIds);
+            if (rpcError) {
+                if (isMissingPublishRpcError(rpcError)) {
+                    throw new Error(
+                        "Cloud publishing requires the atomic publish_profile_snapshot database function. Please run database migrations; your local draft is preserved.",
+                    );
+                }
+                throw new Error(rpcError.message);
+            }
+            if (typeof rpcRevision !== "number") {
+                throw new Error("Cloud publish returned an invalid revision.");
+            }
+            const nextRevision = rpcRevision;
+            snapshotCommitted = true;
+
+            if (params.cloudProfileId) {
+                const profilesTable = client.from("profiles");
+                if (profilesTable && typeof profilesTable.select === "function" && typeof profilesTable.update === "function") {
+                    const { data: existingProfile } = await profilesTable
+                        .select("name")
+                        .eq("id", profileId)
+                        .maybeSingle();
+                    if (!existingProfile || existingProfile.name !== params.profileName) {
+                        const { error: renameError } = await profilesTable
+                            .update({ name: params.profileName })
+                            .eq("id", profileId);
+                        if (renameError) throw new Error(renameError.message);
+                    }
+                } else if (profilesTable && typeof profilesTable.update === "function") {
+                    const { error: renameError } = await profilesTable
+                        .update({ name: params.profileName })
+                        .eq("id", profileId);
+                    if (renameError) throw new Error(renameError.message);
+                }
             }
 
-            const nextRevision = params.cloudProfileId ? (expectedRev ?? 1) + 1 : (expectedRev ?? 1);
-            return { ok: true, cloudProfileId: targetCloudId, revision: nextRevision };
+            return { ok: true, cloudProfileId: profileId, revision: nextRevision };
         } catch (error) {
+            if (!snapshotCommitted && !params.cloudProfileId && targetCloudId) {
+                try {
+                    await client.from("profiles").delete().eq("id", targetCloudId);
+                } catch {
+                    // Best-effort cleanup of uncommitted shell profile.
+                }
+            }
             const msg = error instanceof Error ? error.message : "Cloud publish failed.";
             let errorMessage = msg;
+            let isConflict = false;
             if (msg.includes("STALE_REVISION")) {
+                isConflict = true;
                 errorMessage =
                     "Cloud profile was updated on another device. Download a copy before publishing; your local draft is intact.";
             } else if (msg.includes("PERMISSION_DENIED")) {
@@ -182,7 +202,8 @@ export class CloudSyncService {
             }
             return {
                 ok: false,
-                ...(targetCloudId ? { cloudProfileId: targetCloudId, revision: expectedRev ?? 1 } : {}),
+                ...(params.cloudProfileId ? { cloudProfileId: params.cloudProfileId, revision: expectedRev ?? 1 } : {}),
+                ...(isConflict ? { isConflict: true } : {}),
                 error: errorMessage,
             };
         }
@@ -190,14 +211,17 @@ export class CloudSyncService {
 
     async downloadAsLocalCopy(
         cloudProfile: ProfileRow,
+        userId: string,
+        targetLocalProfileId?: string,
     ): Promise<{ ok: boolean; doc?: LocalProfileDocument; error?: string }> {
         const client = this.getClient();
         if (!client) return { ok: false, error: "Supabase is not configured." };
         const user = await this.getCurrentUser();
-        if (!user) return { ok: false, error: "Please sign in as a guardian first." };
+        if (user?.id !== userId) return { ok: false, error: "The signed-in account changed." };
 
         const repo = this.makeRepo(client);
-        const localProfileId = `profile-${uid()}`;
+        const localProfileId = targetLocalProfileId ?? `profile-${uid()}`;
+        const newlyAddedMediaIds: string[] = [];
         try {
             const [boards, folderTiles, words, settings] = await Promise.all([
                 repo.listBoards(cloudProfile.id),
@@ -213,15 +237,21 @@ export class CloudSyncService {
             for (const t of words.map(wordToTile)) tileMap[t.id] = t;
             for (const t of folderTiles) tileMap[t.id] = t;
 
-            // Download referenced media into local IndexedDB under the new localProfileId.
+            // Download referenced media into local IndexedDB under the target localProfileId.
             const mediaIds = new Set(Object.values(tileMap).flatMap(tile => (tile.mediaId ? [tile.mediaId] : [])));
             for (const mediaId of mediaIds) {
+                const alreadyExists = targetLocalProfileId
+                    ? (await this.mediaRepo.loadMedia(localProfileId, mediaId)) !== null
+                    : false;
                 const blob = await repo.downloadProfileMedia(cloudProfile.id, mediaId);
                 if (!blob) throw new Error(`Could not download photo ${mediaId}.`);
                 const saved = await this.mediaRepo.saveMedia(localProfileId, mediaId, blob, {
                     mimeType: blob.type || "image/webp", width: 0, height: 0,
                 });
                 if (!saved.ok) throw new Error(`Could not save photo ${mediaId}: ${saved.error ?? "storage error"}`);
+                if (!alreadyExists) {
+                    newlyAddedMediaIds.push(mediaId);
+                }
             }
 
             const boardData: BoardData = {
@@ -245,6 +275,7 @@ export class CloudSyncService {
                 sentence: [],
             };
 
+            if ((await this.getCurrentUser())?.id !== userId) throw new Error("The signed-in account changed.");
             return {
                 ok: true,
                 doc: {
@@ -253,17 +284,73 @@ export class CloudSyncService {
                     name: cloudProfile.name,
                     cloudProfileId: cloudProfile.id,
                     cloudRevision: cloudProfile.revision ?? 1,
+                    ownerUserId: userId,
                     dirty: false,
+                    localEditVersion: 0,
+                    lastPublishedEditVersion: 0,
                     boardData,
                 },
             };
         } catch (error) {
-            await discardPreparedMedia(localProfileId, this.mediaRepo);
+            if (!targetLocalProfileId) {
+                await discardPreparedMedia(localProfileId, this.mediaRepo);
+            } else {
+                await Promise.all(newlyAddedMediaIds.map(id => this.mediaRepo.removeMedia(localProfileId, id)));
+            }
             return {
                 ok: false,
                 error: error instanceof Error ? error.message : "Could not download cloud profile.",
             };
         }
+    }
+
+    async syncAssignedProfileForCurrentUser(
+        userId: string,
+        currentCloudProfileId: string | null,
+        currentRevision: number | null,
+        isLocalDirty: boolean,
+        targetLocalProfileId?: string,
+    ): Promise<{ ok: boolean; doc?: LocalProfileDocument; updated?: boolean; conflictProfile?: ProfileRow; error?: string }> {
+        const res = await this.listCloudProfiles(userId);
+        if (!res.ok || res.profiles.length === 0) {
+            return { ok: res.ok, updated: false, ...(res.error ? { error: res.error } : {}) };
+        }
+
+        const target =
+            (currentCloudProfileId
+                ? res.profiles.find(p => p.id === currentCloudProfileId)
+                : undefined) ?? res.profiles[0];
+        if (!target) {
+            return { ok: true, updated: false };
+        }
+
+        if (isLocalDirty) {
+            if (
+                currentCloudProfileId === null ||
+                target.id !== currentCloudProfileId ||
+                (target.revision ?? 1) > (currentRevision ?? 0)
+            ) {
+                return { ok: true, updated: false, conflictProfile: target };
+            }
+            return { ok: true, updated: false };
+        }
+
+        if (
+            target.id === currentCloudProfileId &&
+            (target.revision ?? 1) <= (currentRevision ?? 0)
+        ) {
+            return { ok: true, updated: false };
+        }
+
+        const dl = await this.downloadAsLocalCopy(
+            target,
+            userId,
+            target.id === currentCloudProfileId ? targetLocalProfileId : undefined,
+        );
+        if (!dl.ok || !dl.doc) {
+            return { ok: false, error: dl.error };
+        }
+        return { ok: true, doc: dl.doc, updated: true };
     }
 }
 

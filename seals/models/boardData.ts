@@ -1,12 +1,5 @@
 import type { Tile, CatalogBoard, GridConfig, SentenceToken, ColorMode, BoardPage } from "@/lib/board";
 
-export type SpeechProviderMode = "local" | "cloud-puter" | "none";
-
-export interface PinVerifier {
-    salt: string;
-    hash: string;
-}
-
 export interface FeatureFlags {
     animation: boolean;
     vibration: boolean;
@@ -20,6 +13,11 @@ export interface ChatMessage {
     id: string;
     sender: "child" | "guardian";
     text: string;
+    senderUserId?: string | null;
+    senderName?: string | null;
+    verified?: boolean;
+    pendingContext?: { userId: string; localProfileId: string; cloudProfileId: string };
+    createdAt?: string;
 }
 
 export interface ExperimentalData {
@@ -48,14 +46,9 @@ export interface BoardData {
         volume: number;
         speakOnTap: boolean;
         autoClear: "off" | "afterSpeak" | "nextTap";
-        provider: SpeechProviderMode;
-        voiceId: string | null;
-        languageTag: string;
         rate: number;
     };
     accessConfig: {
-        editPin: string | null;
-        pinVerifier?: PinVerifier | null;
         longPressToEdit: boolean;
         holdDurationMs: number;
         moveTolerancePx: number;

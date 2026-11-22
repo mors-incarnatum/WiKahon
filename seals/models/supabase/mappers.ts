@@ -4,7 +4,7 @@ import type { Word } from "../word";
 import type { BoardRow, Insert, Json, ProfileSettingsRow, TileRow, WordRow } from "./database.types";
 
 export type CloudSettings = Pick<BoardData, "catalogOrder" | "gridConfig" | "layoutMode" | "tileAppearance" | "speechConfig"> & {
-    accessConfig: Omit<BoardData["accessConfig"], "editPin" | "pinVerifier">;
+    accessConfig: BoardData["accessConfig"];
     featureFlags?: FeatureFlags;
 };
 
@@ -29,6 +29,9 @@ function requireValid(condition: boolean, field: string): asserts condition {
 }
 function oneOf(value: unknown, choices: readonly string[]): boolean {
     return typeof value === "string" && choices.includes(value);
+}
+export function parseLanguageTag(value: unknown): LanguageTag {
+    return value === "fil" || value === "en" || value === "taglish" ? value : "fil";
 }
 function layoutMode(value: unknown): BoardData["layoutMode"] {
     return value === "manual" || value === "automatic" ? value : undefined;
@@ -183,7 +186,7 @@ export function tileFromRow(row: TileRow): Tile {
         isCustom: row.is_custom,
         ...(row.spoken_text === null ? {} : { spokenText: row.spoken_text }),
         ...(row.media_id ? { mediaId: row.media_id } : {}),
-        ...(row.language ? { language: row.language as LanguageTag } : {}),
+        ...(row.language ? { language: parseLanguageTag(row.language) } : {}),
         ...(row.is_quick_phrase ? { isQuickPhrase: row.is_quick_phrase } : {}),
         ...(row.target_board_id === null ? {} : { targetBoardId: row.target_board_id }),
         ...(row.color_key === null ? {} : { colorKey: row.color_key }),
@@ -225,7 +228,7 @@ export function wordFromRow(row: WordRow): Word {
         isCustom: row.is_custom,
         ...(row.spoken_text === null ? {} : { spokenText: row.spoken_text }),
         ...(row.media_id ? { mediaId: row.media_id } : {}),
-        ...(row.language ? { language: row.language as LanguageTag } : {}),
+        ...(row.language ? { language: parseLanguageTag(row.language) } : {}),
         ...(row.is_quick_phrase ? { isQuickPhrase: row.is_quick_phrase } : {}),
         ...(row.color_key === null ? {} : { colorKey: row.color_key }),
         ...(row.word_class === null ? {} : { wordClass: row.word_class }),
@@ -256,11 +259,8 @@ export function settingsFromRow(row: ProfileSettingsRow): CloudSettings {
             s.volume <= 1 &&
             typeof s.speakOnTap === "boolean" &&
             oneOf(s.autoClear, ["off", "afterSpeak", "nextTap"]) &&
-            (s.provider === undefined || oneOf(s.provider, ["local", "cloud-puter", "none"])) &&
             (s.rate === undefined ||
-                (typeof s.rate === "number" && Number.isFinite(s.rate) && s.rate >= 0.5 && s.rate <= 2)) &&
-            (s.languageTag === undefined || (typeof s.languageTag === "string" && s.languageTag.trim().length > 0)) &&
-            (s.voiceId === undefined || s.voiceId === null || typeof s.voiceId === "string"),
+                (typeof s.rate === "number" && Number.isFinite(s.rate) && s.rate >= 0.5 && s.rate <= 2)),
         "speech config",
     );
     requireValid(
@@ -307,9 +307,6 @@ export function settingsFromRow(row: ProfileSettingsRow): CloudSettings {
             volume: s.volume as number,
             speakOnTap: s.speakOnTap as boolean,
             autoClear: s.autoClear as BoardData["speechConfig"]["autoClear"],
-            provider: (s.provider ?? "local") as BoardData["speechConfig"]["provider"],
-            voiceId: s.voiceId === undefined ? null : (s.voiceId as string | null),
-            languageTag: typeof s.languageTag === "string" ? s.languageTag.trim() : "fil-PH",
             rate: (s.rate ?? 1) as number,
         },
         accessConfig: {
@@ -323,7 +320,7 @@ export function settingsFromRow(row: ProfileSettingsRow): CloudSettings {
 }
 
 export function settingsToRow(profileId: string, data: CloudSettings): Insert<"profile_settings"> {
-    // Explicit allowlist keeps editPin, pinVerifier, and sentence local even when a whole store is passed.
+    // Explicit allowlist excludes legacy PIN fields and the local sentence.
     const rawFlags = data.featureFlags ?? DEFAULT_FEATURE_FLAGS;
     const featureFlags: FeatureFlags = { ...DEFAULT_FEATURE_FLAGS };
     for (const key of Object.keys(DEFAULT_FEATURE_FLAGS) as (keyof FeatureFlags)[]) {
@@ -339,8 +336,6 @@ export function settingsToRow(profileId: string, data: CloudSettings): Insert<"p
             : typeof data.speechConfig.rate === "number" && Number.isFinite(data.speechConfig.rate)
               ? Math.max(0.5, Math.min(2, data.speechConfig.rate))
               : data.speechConfig.rate;
-    const languageTag =
-        typeof data.speechConfig.languageTag === "string" ? data.speechConfig.languageTag.trim() || "fil-PH" : "fil-PH";
 
     const row: Insert<"profile_settings"> = {
         profile_id: profileId,
@@ -363,9 +358,6 @@ export function settingsToRow(profileId: string, data: CloudSettings): Insert<"p
             volume,
             speakOnTap: data.speechConfig.speakOnTap,
             autoClear: data.speechConfig.autoClear,
-            provider: data.speechConfig.provider ?? "local",
-            voiceId: data.speechConfig.voiceId ?? null,
-            languageTag,
             rate,
         }),
         access_config: json({

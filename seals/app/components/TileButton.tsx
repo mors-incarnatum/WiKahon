@@ -69,11 +69,14 @@ export default function TileButton({
           ? "slate"
           : tile?.colorKey ?? color;
 
+    const isInactiveSlot = !editing && (!tile || hidden);
+
     return (
         <button
             type="button"
             {...events}
             className={`aac-tile ${hidden ? "hidden-tile" : ""} ${moving ? "moving-tile" : ""}`}
+            tabIndex={isInactiveSlot ? -1 : undefined}
             aria-label={
                 hidden && !editing
                     ? "Empty slot"
@@ -83,7 +86,7 @@ export default function TileButton({
                         ? "Add tile"
                         : "Empty slot"
             }
-            aria-disabled={(!tile || hidden) && !editing && !onMove}
+            aria-disabled={isInactiveSlot && !onMove}
         >
             {tile && (!hidden || editing) ? (
                 <TileVisual tile={tile} color={actualColor} appearance={appearance} />

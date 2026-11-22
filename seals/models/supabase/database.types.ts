@@ -2,6 +2,7 @@ import type { ColorKey, WordClass } from "@/lib/board";
 
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 export type ProfileMemberRole = "editor" | "viewer";
+export type AppUserRole = "PARENT" | "CAREGIVER" | "CHILD";
 type Table<Row, Required extends keyof Row, Relations extends Relationship[] = []> = {
     Row: Row;
     Insert: Pick<Row, Required> & Partial<Omit<Row, Required>>;
@@ -79,8 +80,23 @@ export type ProfileSettingsRow = {
     access_config: Json;
     feature_flags: Json;
 };
+export type UserAccountRow = {
+    user_id: string;
+    username: string;
+    display_name: string;
+    role: AppUserRole;
+};
+export type ProfileChatMessageRow = {
+    id: string;
+    profile_id: string;
+    sender_user_id: string;
+    sender_role: "guardian" | "child";
+    sender_name: string;
+    text: string;
+    created_at: string;
+};
 
-/** Schema contract for 20261117000100_board_models.sql + 20261117000200_w07_revisions_media_and_flags.sql + 20261118000100_words_schema.sql (normalized to omit Timestamps and publish_profile_snapshot) */
+/** Schema contract for 20261117000100_board_models.sql + 20261117000200_w07_revisions_media_and_flags.sql + 20261118000100_words_schema.sql + 20261122000100_auth_roles_and_publish_fix.sql + 20261122000200_guardian_signup_role.sql + 20261122000300_security_hardening.sql (normalized to omit Timestamps) */
 export type Database = {
     public: {
         Tables: {
@@ -135,10 +151,43 @@ export type Database = {
                     },
                 ]
             >;
+            user_accounts: Table<UserAccountRow, "user_id" | "username" | "display_name">;
+            profile_chat_messages: Table<
+                ProfileChatMessageRow,
+                "profile_id" | "sender_user_id" | "sender_role" | "sender_name" | "text",
+                [ProfileRelation<"profile_chat_messages_profile_id_fkey">]
+            >;
         };
         Views: { [_ in never]: never };
-        Functions: { [_ in never]: never };
+        Functions: {
+            publish_profile_snapshot: {
+                Args: {
+                    p_profile_id: string;
+                    p_expected_revision: number | null;
+                    p_boards: Json;
+                    p_tiles: Json;
+                    p_words?: Json;
+                    p_settings: Json;
+                };
+                Returns: number;
+            };
+            resolve_login_email: {
+                Args: {
+                    p_identifier: string;
+                };
+                Returns: string | null;
+            };
+            send_profile_chat_message: {
+                Args: {
+                    p_profile_id: string;
+                    p_text: string;
+                    p_message_id?: string | null;
+                };
+                Returns: Json;
+            };
+        };
         Enums: {
+            app_user_role: AppUserRole;
             profile_member_role: ProfileMemberRole;
             tile_kind: "word" | "folder";
             board_color: ColorKey;

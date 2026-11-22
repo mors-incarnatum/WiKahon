@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useRouter } from "next/navigation";
 import type { Tile } from "@/lib/board";
 import {
     cropAndNormalizeGrid,
@@ -13,7 +14,7 @@ import {
     type VocabularyCandidate,
 } from "@/services/scribble/scribbleOcrService";
 import { useBoardStore } from "@/store/BoardProvider";
-import { useSentenceContext } from "@/viewmodels/useBoardShellViewModel";
+import { getLastBoardPath, useSentenceContext } from "@/viewmodels/useBoardShellViewModel";
 
 export type ScribblePenSize = "sm" | "md" | "lg";
 export type ScribbleTool = "pen" | "eraser";
@@ -175,9 +176,10 @@ function buildBinaryMask(rgba: Uint8ClampedArray, width: number, height: number)
  * Freehand & Guided Word Tracing modes, drawing tools, and sentence integration.
  */
 export function useScribblePracticeViewModel(
-    onClose: () => void,
+    onClose?: () => void,
     ocrService: IScribbleOcrService = scribbleOcrService,
 ) {
+    const router = useRouter();
     const sentence = useSentenceContext();
     const tiles = useBoardStore(s => s.tiles);
     const boards = useBoardStore(s => s.boards);
@@ -635,6 +637,14 @@ export function useScribblePracticeViewModel(
         setStatusMessage(`Added "${text}" to sentence.`);
     };
 
+    const handleClose = () => {
+        if (onClose) {
+            onClose();
+        } else {
+            router.push(getLastBoardPath());
+        }
+    };
+
     return {
         canvasRef,
         state: {
@@ -661,7 +671,7 @@ export function useScribblePracticeViewModel(
             isSpeaking: sentence.state.isSpeaking,
         },
         actions: {
-            onClose,
+            onClose: handleClose,
             setMode,
             setEngine,
             setPenSize,

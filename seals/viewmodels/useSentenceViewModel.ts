@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useBoardStore } from "@/store/BoardProvider";
-import { ttsService } from "@/services/tts/ttsService";
+import { SpeechError, ttsService } from "@/services/tts/ttsService";
 import { triggerTapVibration } from "@/lib/haptics";
 import type { Tile } from "@/lib/board";
 
@@ -53,9 +53,6 @@ export function useSentenceViewModel() {
         try {
             await ttsService.speak({
                 text,
-                languageTag: config.languageTag || "fil-PH",
-                provider: config.provider ?? "local",
-                voiceId: config.voiceId ?? null,
                 rate: config.rate ?? 1,
                 volume: config.volume,
             });
@@ -65,7 +62,7 @@ export function useSentenceViewModel() {
                 if (config.autoClear === "nextTap") clearNext.current = true;
             }
         } catch (e) {
-            if (id === request.current) {
+            if (id === request.current && !(e instanceof SpeechError && e.kind === "cancelled")) {
                 setError(e instanceof Error ? e.message : "Speech unavailable");
             }
         } finally {

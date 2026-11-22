@@ -12,7 +12,6 @@ import {
     type SentenceToken,
 } from "@/lib/board";
 import { initialData } from "@/lib/boardDefaults";
-import { createPinVerifier, verifyPin } from "@/lib/pinVerifier";
 import {
     DEFAULT_FEATURE_FLAGS,
     type BoardData,
@@ -24,14 +23,23 @@ import {
     PROFILE_SCHEMA_VERSION,
     type LocalProfileDocument,
     type LocalStorageStatus,
+    type OfflineDesignatedProfileSummary,
     type ProfileSummary,
+    type RecoverableLegacyProfileSummary,
 } from "@/models/profile";
 import type { User } from "@/models/user";
-import { type AuthSession, findDummyAccountById, isGuardianRole } from "@/models/auth";
+import { type AuthSession, isGuardianRole, LOCAL_CHILD_SESSION } from "@/models/auth";
+import { verifySessionServerAction } from "@/app/actions/auth";
 import { authService, type AuthService } from "@/services/auth/authService";
-import { isValidChatMessage } from "@/services/chat/chatSocketService";
+import {
+    chatSocketService,
+    isSameChatBindingContext,
+    isValidChatMessage,
+    type ChatBindingContext,
+    type ChatSocketListener,
+} from "@/services/chat/chatSocketService";
 import { localProfileService, LocalProfileService } from "@/services/storage/localProfileService";
-import { mediaRepository } from "@/services/storage/mediaRepository";
+import { discardPreparedMedia, mediaRepository } from "@/services/storage/mediaRepository";
 import { ttsService } from "@/services/tts/ttsService";
 
 export type { BoardData } from "@/models/boardData";
@@ -45,46 +53,51 @@ export interface BoardState extends BoardData {
     activeProfileName: string;
     cloudProfileId: string | null;
     cloudRevision: number | null;
+    activeProfileOwnerId: string | null;
     profiles: ProfileSummary[];
+    offlineDesignatedProfiles: OfflineDesignatedProfileSummary[];
+    recoverableLegacyProfiles: RecoverableLegacyProfileSummary[];
     storageStatus: LocalStorageStatus;
     storageError: string | null;
     dirty: boolean;
+    localEditVersion: number;
+    lastPublishedEditVersion: number;
 
     // Session-local state (never persisted to localStorage or cloud)
     sentenceHistory: SentenceToken[][];
     sentenceRevision: number;
     preReflowSnapshot: PreReflowSnapshot | null;
-    isEditUnlocked: boolean;
     currentUser: User | null;
+    authSessionExpiresAt: string | null;
+    chatLastReadAt: Record<string, string>;
 
     // Auth commands
-    loginWithCredentials: (
-        identifier: string,
-        password: string,
-        authSvc?: AuthService,
-    ) => { ok: boolean; error?: string };
-    loginWithAccountId: (userId: string, authSvc?: AuthService) => { ok: boolean; error?: string };
+    applyAuthSession: (session: AuthSession) => { ok: boolean };
+    enterOfflineChildMode: (localProfileId?: string) => void;
+    handleSessionExpired: () => void;
     logout: (authSvc?: AuthService) => void;
 
     // Hydration & profile commands (W01)
     hydrateFromStorage: (service?: LocalProfileService) => Promise<void>;
+    reloadLocalProfiles: () => void;
+    applySyncedCloudProfile: (doc: LocalProfileDocument, service?: LocalProfileService) => boolean;
     switchProfile: (localProfileId: string, service?: LocalProfileService) => void;
     createProfile: (name: string, boardData?: BoardData, service?: LocalProfileService) => string;
     renameProfile: (localProfileId: string, name: string, service?: LocalProfileService) => void;
     deleteProfile: (localProfileId: string, service?: LocalProfileService) => void;
     importProfileDocument: (doc: LocalProfileDocument, service?: LocalProfileService) => string;
+    setProfileOfflineDesignated: (localProfileId: string, enabled: boolean) => boolean;
+    recoverLegacyProfile: (
+        legacyProfileId: string,
+    ) => Promise<{ ok: boolean; localProfileId?: string; error?: string }>;
     markCloudSynced: (
         localProfileId: string,
         cloudProfileId: string,
         cloudRevision: number,
+        publishedEditVersion?: number,
         preserveDirty?: boolean,
     ) => void;
     clearStorageError: () => void;
-
-    // Editing session guard (W07)
-    unlockEditSession: (pin?: string) => Promise<{ ok: boolean; error?: string }>;
-    lockEditSession: () => void;
-    setEditPin: (pin: string | null) => Promise<boolean>;
 
     // Layout & grid commands (W02)
     setGridConfig: (grid: GridConfig, boardId?: string) => boolean;
@@ -101,7 +114,7 @@ export interface BoardState extends BoardData {
     rollbackReflow: () => boolean;
     setTileAppearance: (patch: Partial<BoardData["tileAppearance"]>) => boolean;
     setSpeechConfig: (patch: Partial<BoardData["speechConfig"]>) => boolean;
-    setAccessConfig: (patch: Partial<Omit<BoardData["accessConfig"], "editPin" | "pinVerifier">>) => boolean;
+    setAccessConfig: (patch: Partial<BoardData["accessConfig"]>) => boolean;
     setFeatureFlags: (patch: Partial<FeatureFlags>) => boolean;
 
     // Sentence commands (W04)
@@ -136,8 +149,10 @@ export interface BoardState extends BoardData {
 
     // Experimental module data (W09 - retained when disabled)
     addScribbleDraft: (text: string) => void;
-    addChatMessage: (sender: ChatMessage["sender"], text: string) => ChatMessage | null;
-    receiveChatMessages: (incoming: ChatMessage[]) => void;
+    addChatMessage: (sender: ChatMessage["sender"], text: string, context: ChatBindingContext | null, id: string) => ChatMessage | null;
+    dismissLegacyChatMessages: () => boolean;
+    receiveChatMessages: (incoming: ChatMessage[], context?: ChatBindingContext) => void;
+    markChatRead: () => void;
     togglePinnedTile: (tileId: string) => boolean;
 }
 
@@ -302,44 +317,376 @@ function reflowBoard(data: BoardData, id: string) {
     }
 }
 
+function cleanAccessConfig(config: BoardData["accessConfig"]): BoardData["accessConfig"] {
+    return {
+        longPressToEdit: config.longPressToEdit,
+        holdDurationMs: config.holdDurationMs,
+        moveTolerancePx: config.moveTolerancePx,
+        swipeThresholdPx: config.swipeThresholdPx,
+    };
+}
+
+export function accountProfileOwnerId(user: User | null): string | null {
+    return user && user.id !== LOCAL_CHILD_SESSION.user.id ? user.id : null;
+}
+
+const CHAT_LAST_READ_STORAGE_KEY = "wikahon.chatLastReadAt.v1";
+
+function readChatLastReadMap(): Record<string, string> {
+    if (typeof window === "undefined") return {};
+    try {
+        const raw = window.localStorage.getItem(CHAT_LAST_READ_STORAGE_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+        const result: Record<string, string> = {};
+        for (const [key, value] of Object.entries(parsed)) {
+            if (typeof value === "string" && value.length > 0) {
+                result[key] = value;
+            }
+        }
+        return result;
+    } catch {
+        return {};
+    }
+}
+
+function writeChatLastReadMap(map: Record<string, string>): void {
+    if (typeof window === "undefined") return;
+    try {
+        window.localStorage.setItem(CHAT_LAST_READ_STORAGE_KEY, JSON.stringify(map));
+    } catch {
+        // Ignore storage quota or private-mode failures for read markers.
+    }
+}
+
+export function sortChatMessages(messages: ChatMessage[]): ChatMessage[] {
+    return messages
+        .map((message, index) => {
+            const ts = message.createdAt ? Date.parse(message.createdAt) : NaN;
+            return { message, index, ts };
+        })
+        .sort((a, b) => {
+            const aValid = Number.isFinite(a.ts);
+            const bValid = Number.isFinite(b.ts);
+            if (!aValid && !bValid) return a.index - b.index;
+            if (!aValid) return -1;
+            if (!bValid) return 1;
+            if (a.ts !== b.ts) return a.ts - b.ts;
+            return a.message.id.localeCompare(b.message.id);
+        })
+        .map(entry => entry.message);
+}
+
+export function isOwnChatMessage(
+    message: ChatMessage,
+    currentUserId: string | null,
+    senderRole: ChatMessage["sender"],
+): boolean {
+    if (message.verified !== true && message.pendingContext) {
+        return message.pendingContext.userId === currentUserId;
+    }
+    if (message.verified === true) {
+        return message.senderUserId && currentUserId
+            ? message.senderUserId === currentUserId
+            : message.sender === senderRole;
+    }
+    return false;
+}
+
+export function chatReadScopeKey(
+    userId: string,
+    activeProfileId: string,
+    cloudProfileId: string | null,
+): string {
+    return `${userId}:${cloudProfileId ?? activeProfileId}`;
+}
+
+export function countUnreadChatMessages(
+    messages: ChatMessage[],
+    currentUserId: string | null,
+    senderRole: ChatMessage["sender"],
+    lastReadAt?: string,
+): number {
+    if (!currentUserId) return 0;
+    const lastReadTs = lastReadAt ? Date.parse(lastReadAt) : NaN;
+    let count = 0;
+    for (const m of messages) {
+        if (m.verified !== true || !m.createdAt) continue;
+        if (isOwnChatMessage(m, currentUserId, senderRole)) continue;
+        const msgTs = Date.parse(m.createdAt);
+        if (!Number.isFinite(msgTs)) continue;
+        if (!Number.isFinite(lastReadTs) || msgTs > lastReadTs) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+export function matchesChatBindingContext(
+    state: Pick<BoardState, "currentUser" | "activeProfileId" | "cloudProfileId">,
+    context: ChatBindingContext | null | undefined,
+): boolean {
+    if (!context) return false;
+    return (
+        state.currentUser?.id === context.userId &&
+        state.activeProfileId === context.localProfileId &&
+        state.cloudProfileId === context.cloudProfileId
+    );
+}
+
+/** Builds a chat binding context for a signed-in user with a linked cloud profile, or null otherwise. */
+export function resolveChatBindingContext(
+    user: User | null,
+    activeProfileId: string,
+    cloudProfileId: string | null,
+): ChatBindingContext | null {
+    if (!user || user.id === LOCAL_CHILD_SESSION.user.id || !cloudProfileId) {
+        return null;
+    }
+    return {
+        userId: user.id,
+        localProfileId: activeProfileId,
+        cloudProfileId,
+    };
+}
+
+/** Creates context-verified socket handlers so stale messages never cross identity or profile boundaries. */
+export function createBoundChatSocketHandlers(
+    getState: () => Pick<
+        BoardState,
+        "currentUser" | "activeProfileId" | "cloudProfileId" | "experimentalData" | "receiveChatMessages"
+    >,
+    activeContext: ChatBindingContext | null,
+): Pick<ChatSocketListener, "onMessages" | "getLocalMessages"> {
+    return {
+        onMessages: (incoming, msgContext) => {
+            if (!activeContext) return;
+            if (msgContext && !isSameChatBindingContext(msgContext, activeContext)) return;
+            const latest = getState();
+            if (!matchesChatBindingContext(latest, activeContext)) return;
+            latest.receiveChatMessages(incoming, activeContext);
+        },
+        getLocalMessages: msgContext => {
+            if (!activeContext) return [];
+            if (msgContext && !isSameChatBindingContext(msgContext, activeContext)) return [];
+            const latest = getState();
+            if (!matchesChatBindingContext(latest, activeContext)) return [];
+            return latest.experimentalData?.chatMessages ?? [];
+        },
+    };
+}
+
+function buildActivatedProfileState(params: {
+    doc: LocalProfileDocument;
+    previousSentenceRevision: number;
+    profiles: ProfileSummary[];
+    storageStatus: LocalStorageStatus;
+    storageError: string | null;
+    dirty?: boolean;
+    localEditVersion?: number;
+    lastPublishedEditVersion?: number;
+}) {
+    const { doc, previousSentenceRevision, profiles, storageStatus, storageError } = params;
+    return {
+        tiles: doc.boardData.tiles,
+        boards: doc.boardData.boards,
+        catalogOrder: doc.boardData.catalogOrder,
+        gridConfig: doc.boardData.gridConfig,
+        layoutMode: doc.boardData.layoutMode ?? ("manual" as const),
+        tileAppearance: doc.boardData.tileAppearance,
+        speechConfig: doc.boardData.speechConfig,
+        accessConfig: doc.boardData.accessConfig,
+        featureFlags: doc.boardData.featureFlags ?? { ...DEFAULT_FEATURE_FLAGS },
+        experimentalData: doc.boardData.experimentalData,
+        sentence: doc.boardData.sentence ?? [],
+        sentenceHistory: [] as SentenceToken[][],
+        sentenceRevision: previousSentenceRevision + 1,
+        preReflowSnapshot: null,
+        activeProfileId: doc.localProfileId,
+        activeProfileName: doc.name,
+        activeProfileOwnerId: doc.ownerUserId ?? null,
+        cloudProfileId: doc.cloudProfileId ?? null,
+        cloudRevision: doc.cloudRevision ?? null,
+        profiles,
+        storageStatus,
+        storageError,
+        dirty: params.dirty ?? doc.dirty ?? false,
+        localEditVersion: params.localEditVersion ?? doc.localEditVersion ?? 0,
+        lastPublishedEditVersion: params.lastPublishedEditVersion ?? doc.lastPublishedEditVersion ?? 0,
+    };
+}
+
+function buildUnauthenticatedState(previousSentenceRevision: number) {
+    return {
+        ...buildActivatedProfileState({
+            doc: {
+                schemaVersion: PROFILE_SCHEMA_VERSION,
+                localProfileId: "unauthenticated",
+                name: "Not signed in",
+                cloudProfileId: null,
+                cloudRevision: null,
+                ownerUserId: null,
+                dirty: false,
+                localEditVersion: 0,
+                lastPublishedEditVersion: 0,
+                boardData: initialData(),
+            },
+            previousSentenceRevision,
+            profiles: [],
+            storageStatus: "ok",
+            storageError: null,
+            dirty: false,
+            localEditVersion: 0,
+            lastPublishedEditVersion: 0,
+        }),
+        currentUser: null as User | null,
+        authSessionExpiresAt: null as string | null,
+        chatLastReadAt: {} as Record<string, string>,
+        offlineDesignatedProfiles: [] as OfflineDesignatedProfileSummary[],
+        recoverableLegacyProfiles: [] as RecoverableLegacyProfileSummary[],
+    };
+}
+
 export const createBoardStore = (profileService: LocalProfileService = localProfileService) =>
     createStore<BoardState>()((set, get) => {
-        let persistenceBlocked = false;
-        let failedPinAttempts = 0;
-        let pinLockoutUntil = 0;
+        let persistenceBlocked = true;
+        let authGeneration = 0;
 
-        const resetPinAttempts = () => {
-            failedPinAttempts = 0;
-            pinLockoutUntil = 0;
+        const refreshDiscoveryLists = (user: User | null, svc = profileService) => ({
+            offlineDesignatedProfiles: svc.listOfflineDesignatedProfiles(),
+            recoverableLegacyProfiles: isGuardianRole(user?.role) ? svc.listRecoverableLegacyProfiles() : [],
+        });
+
+        const activateOfflineChildProfiles = (
+            preferredProfileId?: string,
+            svc = profileService,
+        ) => {
+            const previous = get();
+            const res = svc.loadOfflineChildProfiles(preferredProfileId);
+            const doc = res.activeDocument;
+            const accountChanged = previous.currentUser?.id !== LOCAL_CHILD_SESSION.user.id;
+            const profileChanged = previous.activeProfileId !== doc.localProfileId;
+            const cloudChanged = previous.cloudProfileId !== (doc.cloudProfileId ?? null);
+            persistenceBlocked = res.status !== "ok";
+            if (accountChanged || profileChanged) ttsService.stop();
+            if (accountChanged || profileChanged || cloudChanged) {
+                chatSocketService.setActiveContext(null);
+            }
+            set({
+                ...buildActivatedProfileState({
+                    doc,
+                    previousSentenceRevision: previous.sentenceRevision,
+                    profiles: res.index.profiles,
+                    storageStatus: res.status,
+                    storageError: res.errorMessage ?? null,
+                }),
+                currentUser: LOCAL_CHILD_SESSION.user,
+                authSessionExpiresAt: null,
+                ...refreshDiscoveryLists(LOCAL_CHILD_SESSION.user, svc),
+            });
         };
 
-        const persistCurrent = (nextData: BoardData) => {
+        const loadProfilesForUser = (
+            currentUser: User | null,
+            authSessionExpiresAt: string | null,
+            svc = profileService,
+        ) => {
+            const previous = get();
+            if (!currentUser) {
+                persistenceBlocked = true;
+                if (previous.currentUser !== null || previous.activeProfileId !== "unauthenticated") {
+                    ttsService.stop();
+                }
+                if (
+                    previous.currentUser !== null ||
+                    previous.activeProfileId !== "unauthenticated" ||
+                    previous.cloudProfileId !== null
+                ) {
+                    chatSocketService.setActiveContext(null);
+                }
+                set({
+                    ...buildUnauthenticatedState(previous.sentenceRevision),
+                    ...refreshDiscoveryLists(null, svc),
+                });
+                return;
+            }
+
+            const res = svc.loadOrMigrateActiveProfile(accountProfileOwnerId(currentUser));
+            const doc = res.activeDocument;
+            const accountChanged = previous.currentUser?.id !== currentUser.id;
+            const profileChanged = previous.activeProfileId !== doc.localProfileId;
+            const cloudChanged = previous.cloudProfileId !== (doc.cloudProfileId ?? null);
+            persistenceBlocked = res.status !== "ok";
+            if (accountChanged || profileChanged) ttsService.stop();
+            if (accountChanged || profileChanged || cloudChanged) {
+                chatSocketService.setActiveContext(null);
+            }
+            set({
+                ...buildActivatedProfileState({
+                    doc,
+                    previousSentenceRevision: previous.sentenceRevision,
+                    profiles: res.index.profiles,
+                    storageStatus: res.status,
+                    storageError: res.errorMessage ?? null,
+                }),
+                currentUser,
+                authSessionExpiresAt,
+                ...refreshDiscoveryLists(currentUser, svc),
+            });
+        };
+
+        const persistCurrent = (
+            nextData: BoardData,
+            options?: {
+                dirty?: boolean;
+                localEditVersion?: number;
+                lastPublishedEditVersion?: number;
+            },
+        ) => {
             const s = get();
-            if (persistenceBlocked) {
-                set({ dirty: true });
+            const nextDirty = options?.dirty ?? s.dirty;
+            const nextEditVersion = options?.localEditVersion ?? s.localEditVersion;
+            const nextLastPublished = options?.lastPublishedEditVersion ?? s.lastPublishedEditVersion;
+            if (persistenceBlocked || !s.currentUser) {
+                set({
+                    dirty: nextDirty,
+                    localEditVersion: nextEditVersion,
+                    lastPublishedEditVersion: nextLastPublished,
+                });
                 return false;
             }
+            const ownerUserId = s.activeProfileOwnerId ?? accountProfileOwnerId(s.currentUser);
             const doc: LocalProfileDocument = {
                 schemaVersion: PROFILE_SCHEMA_VERSION,
                 localProfileId: s.activeProfileId,
                 name: s.activeProfileName,
                 cloudProfileId: s.cloudProfileId,
                 cloudRevision: s.cloudRevision,
-                dirty: true,
+                ownerUserId,
+                dirty: nextDirty,
+                localEditVersion: nextEditVersion,
+                lastPublishedEditVersion: nextLastPublished,
                 boardData: nextData,
             };
-            const res = profileService.saveProfileDocument(doc);
+            const res = profileService.saveProfileDocument(doc, {
+                allowOfflineDesignated: s.currentUser.id === LOCAL_CHILD_SESSION.user.id,
+            });
             if (!res.ok) {
                 set({
                     storageStatus: res.status,
                     storageError: res.errorMessage ?? "Unable to save changes to local storage.",
-                    dirty: true,
+                    dirty: nextDirty,
+                    localEditVersion: nextEditVersion,
+                    lastPublishedEditVersion: nextLastPublished,
                 });
             } else {
                 set({
                     storageStatus: "ok",
                     storageError: null,
-                    dirty: false,
+                    dirty: nextDirty,
+                    localEditVersion: nextEditVersion,
+                    lastPublishedEditVersion: nextLastPublished,
                 });
             }
             return res.ok;
@@ -347,20 +694,32 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
 
         const canMutateSettings = (): boolean => {
             const s = get();
-            if (s.currentUser?.role === "CHILD") return false;
-            if (isGuardianRole(s.currentUser?.role)) return true;
-            if (!s.accessConfig.pinVerifier) return true;
-            return s.isEditUnlocked;
+            return isGuardianRole(s.currentUser?.role);
         };
 
-        const mutateBoard = (fn: (data: BoardData) => void, requireEditGuard = true): boolean => {
+        const mutateBoard = (
+            fn: (data: BoardData) => void,
+            requireEditGuard = true,
+            markCloudModified = true,
+        ): boolean => {
             if (requireEditGuard && !canMutateSettings()) {
                 return false;
             }
-            const data = extractBoardData(get());
+            const s = get();
+            const data = extractBoardData(s);
             fn(data);
-            set({ ...data, dirty: true, preReflowSnapshot: null });
-            persistCurrent(data);
+            const nextEditVersion = markCloudModified ? s.localEditVersion + 1 : s.localEditVersion;
+            const nextDirty = markCloudModified ? true : s.dirty;
+            set({
+                ...data,
+                dirty: nextDirty,
+                localEditVersion: nextEditVersion,
+                preReflowSnapshot: null,
+            });
+            persistCurrent(data, {
+                dirty: nextDirty,
+                localEditVersion: nextEditVersion,
+            });
             return true;
         };
 
@@ -390,123 +749,258 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
             return ok;
         };
 
-        const applyLoginResult = (
-            res: { ok: true; session: AuthSession } | { ok: false; error: string },
-        ): { ok: boolean; error?: string } => {
-            if (!res.ok) {
-                return { ok: false, error: res.error };
-            }
-            const s = get();
-            const loaded = profileService.loadProfileDocument(s.activeProfileId);
-            resetPinAttempts();
-            if (loaded.doc) {
-                set({
-                    ...loaded.doc.boardData,
-                    experimentalData: loaded.doc.boardData.experimentalData,
-                    activeProfileId: loaded.doc.localProfileId,
-                    activeProfileName: loaded.doc.name,
-                    cloudProfileId: loaded.doc.cloudProfileId ?? null,
-                    cloudRevision: loaded.doc.cloudRevision ?? null,
-                    storageStatus: "ok",
-                    storageError: null,
-                    dirty: false,
-                    sentenceHistory: [],
-                    sentenceRevision: s.sentenceRevision + 1,
-                    preReflowSnapshot: null,
-                    currentUser: res.session.user,
-                    isEditUnlocked: isGuardianRole(res.session.user.role),
-                });
-            } else {
-                set({
-                    currentUser: res.session.user,
-                    isEditUnlocked: isGuardianRole(res.session.user.role),
-                });
-            }
-            return { ok: true };
-        };
-
-        const defaults = initialData();
-
         return {
-            ...defaults,
-            activeProfileId: "default",
-            activeProfileName: "Lily's Board",
-            cloudProfileId: null,
-            cloudRevision: null,
-            profiles: [{ localProfileId: "default", name: "Lily's Board", cloudProfileId: null }],
-            storageStatus: "ok",
-            storageError: null,
-            dirty: false,
-            sentenceHistory: [],
-            sentenceRevision: 0,
-            preReflowSnapshot: null,
-            isEditUnlocked: false,
-            currentUser: null,
+            ...buildUnauthenticatedState(-1),
 
-            loginWithCredentials: (identifier, password, authSvc = authService) =>
-                applyLoginResult(authSvc.loginWithCredentials(identifier, password)),
+            applyAuthSession: session => {
+                authGeneration += 1;
+                authService.clearPendingLogout();
+                const expiresAt = session.expiresAt ?? null;
+                if (get().currentUser?.id === session.user.id) {
+                    set({
+                        currentUser: session.user,
+                        authSessionExpiresAt: expiresAt,
+                        ...refreshDiscoveryLists(session.user),
+                    });
+                } else {
+                    loadProfilesForUser(session.user, expiresAt);
+                }
+                return { ok: true };
+            },
 
-            loginWithAccountId: (userId, authSvc = authService) =>
-                applyLoginResult(authSvc.loginWithAccountId(userId)),
+            enterOfflineChildMode: localProfileId => {
+                authGeneration += 1;
+                activateOfflineChildProfiles(localProfileId);
+            },
+
+            handleSessionExpired: () => {
+                authGeneration += 1;
+                loadProfilesForUser(null, null);
+            },
 
             logout: (authSvc = authService) => {
-                ttsService.stop();
-                authSvc.clearSession();
-                resetPinAttempts();
-                set({ currentUser: null, isEditUnlocked: false });
+                get().handleSessionExpired();
+                void authSvc.signOut().catch(() => undefined);
             },
 
             hydrateFromStorage: async (svc = profileService) => {
-                const res = await svc.loadOrMigrateActiveProfile();
-                persistenceBlocked = res.status !== "ok";
-                const rawSession = authService.loadSession();
-                const validAccount = rawSession ? findDummyAccountById(rawSession.user.id) : null;
-                if (rawSession && !validAccount) {
-                    authService.clearSession();
+                const generation = ++authGeneration;
+                authService.cleanupLegacyAuthStorage();
+                let session: AuthSession | null = null;
+                if (authService.hasPendingLogout()) {
+                    void authService.completePendingSignOut().catch(() => undefined);
+                } else {
+                    try {
+                        const serverRes = await verifySessionServerAction();
+                        if (serverRes?.ok && serverRes.session) session = serverRes.session;
+                    } catch {
+                        // Server verification may be unavailable offline.
+                    }
+                    if (!session) {
+                        try {
+                            session = await authService.getSession();
+                        } catch {
+                            session = null;
+                        }
+                    }
                 }
-                const session = validAccount ? rawSession : null;
-                let activeName = res.activeDocument.name;
-                let profiles = res.index.profiles;
-                if (
-                    res.status === "ok" &&
-                    res.activeDocument.localProfileId === "default" &&
-                    res.activeDocument.name === "Default Child"
-                ) {
-                    activeName = "Lily's Board";
-                    profiles = res.index.profiles.map(p =>
-                        p.localProfileId === "default" && p.name === "Default Child"
-                            ? { ...p, name: activeName }
-                            : p,
-                    );
-                    svc.saveProfileDocument({ ...res.activeDocument, name: activeName });
-                    svc.saveActiveIndex({ ...res.index, profiles });
+                if (authGeneration !== generation) return;
+                if (authService.hasPendingLogout()) {
+                    session = null;
                 }
-                resetPinAttempts();
-                const activeUser = get().currentUser ?? session?.user ?? null;
-                set({
-                    ...res.activeDocument.boardData,
-                    experimentalData: res.activeDocument.boardData.experimentalData,
-                    activeProfileId: res.activeDocument.localProfileId,
-                    activeProfileName: activeName,
-                    cloudProfileId: res.activeDocument.cloudProfileId ?? null,
-                    cloudRevision: res.activeDocument.cloudRevision ?? null,
+                set({ chatLastReadAt: readChatLastReadMap() });
+
+                const offlineChild = typeof navigator !== "undefined" && !navigator.onLine;
+                if (!session && offlineChild) {
+                    const designated = svc.listOfflineDesignatedProfiles();
+                    if (designated.length <= 1) {
+                        activateOfflineChildProfiles(designated[0]?.localProfileId, svc);
+                    } else {
+                        loadProfilesForUser(null, null, svc);
+                    }
+                    return;
+                }
+                loadProfilesForUser(
+                    session?.user ?? null,
+                    session?.expiresAt ?? null,
+                    svc,
+                );
+            },
+
+            reloadLocalProfiles: () => {
+                const s = get();
+                if (!s.currentUser) return;
+                if (s.currentUser.id === LOCAL_CHILD_SESSION.user.id) {
+                    activateOfflineChildProfiles(s.activeProfileId);
+                    return;
+                }
+                loadProfilesForUser(s.currentUser, s.authSessionExpiresAt);
+            },
+
+            applySyncedCloudProfile: (doc, svc = profileService) => {
+                if (persistenceBlocked) return false;
+                const s = get();
+                const targetOwnerId = accountProfileOwnerId(s.currentUser);
+                if (targetOwnerId === null || doc.ownerUserId !== targetOwnerId) return false;
+                const existingSummary = doc.cloudProfileId
+                    ? s.profiles.find(p => p.cloudProfileId === doc.cloudProfileId)
+                    : undefined;
+                let updateInPlaceId: string | null = null;
+                let existingBoardData: BoardData | null = null;
+                if (existingSummary) {
+                    const existingDoc =
+                        existingSummary.localProfileId === s.activeProfileId
+                            ? null
+                            : svc.loadProfileDocument(existingSummary.localProfileId, targetOwnerId).doc;
+                    const isExistingDirty =
+                        existingSummary.localProfileId === s.activeProfileId
+                            ? s.dirty
+                            : Boolean(existingDoc?.dirty);
+                    if (!isExistingDirty) {
+                        updateInPlaceId = existingSummary.localProfileId;
+                        existingBoardData =
+                            existingSummary.localProfileId === s.activeProfileId
+                                ? extractBoardData(s)
+                                : (existingDoc?.boardData ?? null);
+                    }
+                }
+                const fallbackNewId = s.profiles.some(p => p.localProfileId === doc.localProfileId)
+                    ? `profile-${uid()}`
+                    : doc.localProfileId;
+                const targetLocalProfileId = updateInPlaceId ?? fallbackNewId;
+                const keepCurrentActive = updateInPlaceId === null && s.dirty;
+                const copyName =
+                    updateInPlaceId === null && existingSummary
+                        ? `${doc.name} (Cloud rev ${doc.cloudRevision ?? 1})`
+                        : doc.name;
+                const sanitizedDoc: LocalProfileDocument = {
+                    ...doc,
+                    schemaVersion: PROFILE_SCHEMA_VERSION,
+                    localProfileId: targetLocalProfileId,
+                    name: copyName,
+                    ownerUserId: targetOwnerId,
+                    dirty: false,
+                    localEditVersion: doc.localEditVersion ?? 0,
+                    lastPublishedEditVersion: doc.lastPublishedEditVersion ?? 0,
+                    boardData: {
+                        ...doc.boardData,
+                        accessConfig: cleanAccessConfig(doc.boardData.accessConfig),
+                        ...(updateInPlaceId !== null
+                            ? {
+                                  experimentalData:
+                                      doc.boardData.experimentalData ?? existingBoardData?.experimentalData,
+                                  sentence: existingBoardData?.sentence ?? [],
+                              }
+                            : {}),
+                    },
+                };
+                const saveRes = svc.saveProfileDocument(sanitizedDoc);
+                if (!saveRes.ok) {
+                    set({
+                        storageStatus: saveRes.status,
+                        storageError: saveRes.errorMessage ?? "Could not save synced cloud profile.",
+                    });
+                    return false;
+                }
+                const resolvedOwnerId = targetOwnerId;
+                const profiles = s.profiles.some(p => p.localProfileId === targetLocalProfileId)
+                    ? s.profiles.map(p =>
+                          p.localProfileId === targetLocalProfileId
+                              ? {
+                                    ...p,
+                                    name: sanitizedDoc.name,
+                                    cloudProfileId: sanitizedDoc.cloudProfileId ?? null,
+                                    ownerUserId: resolvedOwnerId,
+                                }
+                              : p,
+                      )
+                    : [
+                          ...s.profiles,
+                          {
+                              localProfileId: targetLocalProfileId,
+                              name: sanitizedDoc.name,
+                              cloudProfileId: sanitizedDoc.cloudProfileId ?? null,
+                              ownerUserId: resolvedOwnerId,
+                          },
+                      ];
+                const indexRes = svc.saveActiveIndex({
+                    schemaVersion: PROFILE_SCHEMA_VERSION,
+                    activeProfileId: keepCurrentActive ? s.activeProfileId : targetLocalProfileId,
                     profiles,
-                    storageStatus: res.status,
-                    storageError: res.errorMessage ?? null,
-                    dirty: res.activeDocument.dirty ?? false,
-                    sentenceHistory: [],
-                    sentenceRevision: 0,
-                    preReflowSnapshot: null,
-                    currentUser: activeUser,
-                    isEditUnlocked: isGuardianRole(activeUser?.role),
+                }, targetOwnerId);
+                if (!indexRes.ok) {
+                    if (!updateInPlaceId) {
+                        svc.deleteProfileDocument(targetLocalProfileId, targetOwnerId);
+                    }
+                    set({
+                        storageStatus: indexRes.status,
+                        storageError: indexRes.errorMessage ?? "Could not save synced profile index.",
+                    });
+                    return false;
+                }
+                if (doc.localProfileId !== targetLocalProfileId) {
+                    void mediaRepository
+                        .listProfileMedia(doc.localProfileId)
+                        .then(async records => {
+                            for (const rec of records) {
+                                const loaded = rec.blob instanceof Blob
+                                    ? rec
+                                    : await mediaRepository.loadMedia(doc.localProfileId, rec.mediaId);
+                                if (!loaded) continue;
+                                await mediaRepository.saveMedia(targetLocalProfileId, loaded.mediaId, loaded.blob, {
+                                    mimeType: loaded.mimeType,
+                                    width: loaded.width,
+                                    height: loaded.height,
+                                    checksum: loaded.checksum,
+                                });
+                            }
+                            if (records.length > 0) {
+                                await discardPreparedMedia(doc.localProfileId);
+                            }
+                        })
+                        .catch(() => undefined);
+                }
+                if (keepCurrentActive) {
+                    set({
+                        profiles,
+                        storageStatus: "ok",
+                        storageError: null,
+                        ...refreshDiscoveryLists(s.currentUser, svc),
+                    });
+                    return true;
+                }
+                ttsService.stop();
+                if (
+                    s.activeProfileId !== targetLocalProfileId ||
+                    s.cloudProfileId !== (sanitizedDoc.cloudProfileId ?? null)
+                ) {
+                    chatSocketService.setActiveContext(null);
+                }
+                set({
+                    ...buildActivatedProfileState({
+                        doc: sanitizedDoc,
+                        previousSentenceRevision: s.sentenceRevision,
+                        profiles,
+                        storageStatus: "ok",
+                        storageError: null,
+                        dirty: false,
+                    }),
+                    ...refreshDiscoveryLists(s.currentUser, svc),
                 });
+                return true;
             },
 
             switchProfile: (localProfileId, svc = profileService) => {
                 ttsService.stop();
                 const s = get();
-                if (s.activeProfileId === localProfileId) return;
-                const loaded = svc.loadProfileDocument(localProfileId);
+                if (!s.currentUser) return;
+                const targetSummary = s.profiles.find(p => p.localProfileId === localProfileId);
+                if (s.activeProfileId === localProfileId || !targetSummary) return;
+                const isOfflineChild = s.currentUser.id === LOCAL_CHILD_SESSION.user.id;
+                const targetOwnerId = isOfflineChild
+                    ? (targetSummary.ownerUserId ?? null)
+                    : accountProfileOwnerId(s.currentUser);
+                const loaded = svc.loadProfileDocument(localProfileId, targetOwnerId);
                 if (!loaded.doc) {
                     set({
                         storageStatus: loaded.status,
@@ -514,28 +1008,25 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     });
                     return;
                 }
-                const nextIndex = {
-                    schemaVersion: PROFILE_SCHEMA_VERSION,
-                    activeProfileId: loaded.doc.localProfileId,
-                    profiles: s.profiles,
-                };
-                svc.saveActiveIndex(nextIndex);
+                if (!isOfflineChild) {
+                    const nextIndex = {
+                        schemaVersion: PROFILE_SCHEMA_VERSION,
+                        activeProfileId: loaded.doc.localProfileId,
+                        profiles: s.profiles,
+                    };
+                    svc.saveActiveIndex(nextIndex, accountProfileOwnerId(s.currentUser));
+                }
                 persistenceBlocked = false;
-                resetPinAttempts();
+                chatSocketService.setActiveContext(null);
                 set({
-                    ...loaded.doc.boardData,
-                    experimentalData: loaded.doc.boardData.experimentalData,
-                    activeProfileId: loaded.doc.localProfileId,
-                    activeProfileName: loaded.doc.name,
-                    cloudProfileId: loaded.doc.cloudProfileId ?? null,
-                    cloudRevision: loaded.doc.cloudRevision ?? null,
-                    storageStatus: "ok",
-                    storageError: null,
-                    dirty: false,
-                    sentenceHistory: [],
-                    sentenceRevision: get().sentenceRevision + 1,
-                    preReflowSnapshot: null,
-                    isEditUnlocked: isGuardianRole(s.currentUser?.role),
+                    ...buildActivatedProfileState({
+                        doc: loaded.doc,
+                        previousSentenceRevision: s.sentenceRevision,
+                        profiles: s.profiles,
+                        storageStatus: "ok",
+                        storageError: null,
+                    }),
+                    ...refreshDiscoveryLists(s.currentUser, svc),
                 });
             },
 
@@ -544,36 +1035,39 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 if (!canMutateSettings()) return get().activeProfileId;
                 ttsService.stop();
                 const s = get();
+                const ownerUserId = accountProfileOwnerId(s.currentUser);
                 const data = boardData ?? initialData();
-                const doc = svc.createProfileDocument(name, {
-                    ...data,
-                    accessConfig: { ...data.accessConfig, pinVerifier: s.accessConfig.pinVerifier, editPin: null },
-                });
+                const doc: LocalProfileDocument = {
+                    ...svc.createProfileDocument(name, {
+                        ...data,
+                        accessConfig: cleanAccessConfig(data.accessConfig),
+                    }),
+                    ownerUserId,
+                    dirty: false,
+                    localEditVersion: 0,
+                    lastPublishedEditVersion: 0,
+                };
                 const saveRes = svc.saveProfileDocument(doc);
                 const profiles = [
                     ...s.profiles,
-                    { localProfileId: doc.localProfileId, name: doc.name, cloudProfileId: null },
+                    { localProfileId: doc.localProfileId, name: doc.name, cloudProfileId: null, ownerUserId },
                 ];
                 svc.saveActiveIndex({
                     schemaVersion: PROFILE_SCHEMA_VERSION,
                     activeProfileId: doc.localProfileId,
                     profiles,
-                });
+                }, accountProfileOwnerId(s.currentUser));
+                chatSocketService.setActiveContext(null);
                 set({
-                    ...doc.boardData,
-                    experimentalData: doc.boardData.experimentalData,
-                    activeProfileId: doc.localProfileId,
-                    activeProfileName: doc.name,
-                    cloudProfileId: null,
-                    cloudRevision: null,
-                    profiles,
-                    storageStatus: saveRes.status,
-                    storageError: saveRes.errorMessage ?? null,
-                    dirty: !saveRes.ok,
-                    sentenceHistory: [],
-                    sentenceRevision: s.sentenceRevision + 1,
-                    preReflowSnapshot: null,
-                    isEditUnlocked: isGuardianRole(s.currentUser?.role),
+                    ...buildActivatedProfileState({
+                        doc,
+                        previousSentenceRevision: s.sentenceRevision,
+                        profiles,
+                        storageStatus: saveRes.status,
+                        storageError: saveRes.errorMessage ?? null,
+                        dirty: false,
+                    }),
+                    ...refreshDiscoveryLists(s.currentUser, svc),
                 });
                 return doc.localProfileId;
             },
@@ -584,37 +1078,56 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 const trimmed = name.trim();
                 if (!trimmed) return;
                 const s = get();
+                if (!s.profiles.some(p => p.localProfileId === localProfileId)) return;
+                const ownerUserId = accountProfileOwnerId(s.currentUser);
                 const profiles = s.profiles.map(p =>
                     p.localProfileId === localProfileId ? { ...p, name: trimmed } : p,
                 );
+                if (s.activeProfileId === localProfileId) {
+                    const nextEditVersion = s.localEditVersion + 1;
+                    set({
+                        activeProfileName: trimmed,
+                        profiles,
+                        dirty: true,
+                        localEditVersion: nextEditVersion,
+                    });
+                    persistCurrent(extractBoardData(get()), {
+                        dirty: true,
+                        localEditVersion: nextEditVersion,
+                    });
+                } else {
+                    const loaded = svc.loadProfileDocument(localProfileId, ownerUserId);
+                    if (loaded.doc) {
+                        svc.saveProfileDocument({
+                            ...loaded.doc,
+                            name: trimmed,
+                            dirty: true,
+                            localEditVersion: (loaded.doc.localEditVersion ?? 0) + 1,
+                        });
+                    }
+                    set({ profiles });
+                }
                 svc.saveActiveIndex({
                     schemaVersion: PROFILE_SCHEMA_VERSION,
                     activeProfileId: s.activeProfileId,
                     profiles,
-                });
-                if (s.activeProfileId === localProfileId) {
-                    set({ activeProfileName: trimmed, profiles });
-                    persistCurrent(extractBoardData(get()));
-                } else {
-                    const loaded = svc.loadProfileDocument(localProfileId);
-                    if (loaded.doc) {
-                        svc.saveProfileDocument({ ...loaded.doc, name: trimmed });
-                    }
-                    set({ profiles });
-                }
+                }, ownerUserId);
+                svc.syncOfflineDesignatedProfileMeta(localProfileId, ownerUserId, { name: trimmed });
+                set(refreshDiscoveryLists(s.currentUser, svc));
             },
 
             deleteProfile: (localProfileId, svc = profileService) => {
                 if (persistenceBlocked) return;
                 if (!canMutateSettings()) return;
                 const s = get();
-                if (s.profiles.length <= 1) return;
+                if (s.profiles.length <= 1 || !s.profiles.some(p => p.localProfileId === localProfileId)) return;
+                const ownerUserId = accountProfileOwnerId(s.currentUser);
                 const remaining = s.profiles.filter(p => p.localProfileId !== localProfileId);
                 const nextActiveId =
                     s.activeProfileId === localProfileId ? remaining[0].localProfileId : s.activeProfileId;
                 let replacementDoc: LocalProfileDocument | null = null;
                 if (s.activeProfileId === localProfileId) {
-                    const loaded = svc.loadProfileDocument(nextActiveId);
+                    const loaded = svc.loadProfileDocument(nextActiveId, ownerUserId);
                     if (!loaded.doc) {
                         set({
                             storageStatus: loaded.status,
@@ -624,7 +1137,8 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     }
                     replacementDoc = loaded.doc;
                 }
-                svc.deleteProfileDocument(localProfileId);
+                svc.deleteProfileDocument(localProfileId, ownerUserId);
+                svc.syncOfflineDesignatedProfileMeta(localProfileId, ownerUserId, { deleted: true });
                 void mediaRepository
                     .listProfileMedia(localProfileId)
                     .then(records =>
@@ -635,25 +1149,26 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     schemaVersion: PROFILE_SCHEMA_VERSION,
                     activeProfileId: nextActiveId,
                     profiles: remaining,
-                });
+                }, ownerUserId);
                 if (replacementDoc) {
                     ttsService.stop();
+                    chatSocketService.setActiveContext(null);
                     set({
-                        ...replacementDoc.boardData,
-                        experimentalData: replacementDoc.boardData.experimentalData,
-                        activeProfileId: replacementDoc.localProfileId,
-                        activeProfileName: replacementDoc.name,
-                        cloudProfileId: replacementDoc.cloudProfileId ?? null,
-                        cloudRevision: replacementDoc.cloudRevision ?? null,
-                        profiles: remaining,
-                        sentenceHistory: [],
-                        sentenceRevision: s.sentenceRevision + 1,
-                        preReflowSnapshot: null,
-                        isEditUnlocked: isGuardianRole(s.currentUser?.role),
+                        ...buildActivatedProfileState({
+                            doc: replacementDoc,
+                            previousSentenceRevision: s.sentenceRevision,
+                            profiles: remaining,
+                            storageStatus: "ok",
+                            storageError: null,
+                        }),
+                        ...refreshDiscoveryLists(s.currentUser, svc),
                     });
                     return;
                 }
-                set({ profiles: remaining });
+                set({
+                    profiles: remaining,
+                    ...refreshDiscoveryLists(s.currentUser, svc),
+                });
             },
 
             importProfileDocument: (doc, svc = profileService) => {
@@ -669,19 +1184,22 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 if (s.profiles.some(p => p.localProfileId === newId)) {
                     throw new Error("Imported profile ID already exists.");
                 }
+                const ownerUserId = accountProfileOwnerId(s.currentUser);
+                if (doc.ownerUserId && doc.ownerUserId !== ownerUserId) {
+                    throw new Error("This cloud profile belongs to a different session.");
+                }
                 const imported: LocalProfileDocument = {
                     ...doc,
                     boardData: {
                         ...doc.boardData,
-                        accessConfig: {
-                            ...doc.boardData.accessConfig,
-                            editPin: null,
-                            pinVerifier: s.accessConfig.pinVerifier,
-                        },
+                        accessConfig: cleanAccessConfig(doc.boardData.accessConfig),
                     },
                     schemaVersion: PROFILE_SCHEMA_VERSION,
                     localProfileId: newId,
+                    ownerUserId,
                     dirty: false,
+                    localEditVersion: doc.localEditVersion ?? 0,
+                    lastPublishedEditVersion: doc.lastPublishedEditVersion ?? 0,
                 };
                 const saveRes = svc.saveProfileDocument(imported);
                 if (!saveRes.ok) {
@@ -693,37 +1211,247 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                         localProfileId: newId,
                         name: imported.name,
                         cloudProfileId: imported.cloudProfileId ?? null,
+                        ownerUserId,
                     },
                 ];
                 const indexRes = svc.saveActiveIndex({
                     schemaVersion: PROFILE_SCHEMA_VERSION,
                     activeProfileId: s.activeProfileId,
                     profiles,
-                });
+                }, accountProfileOwnerId(s.currentUser));
                 if (!indexRes.ok) {
-                    svc.deleteProfileDocument(newId);
+                    svc.deleteProfileDocument(newId, ownerUserId);
                     throw new Error(indexRes.errorMessage ?? "Could not save profile list.");
                 }
                 set({
                     profiles,
                     storageStatus: saveRes.status,
                     storageError: saveRes.errorMessage ?? null,
+                    ...refreshDiscoveryLists(s.currentUser, svc),
                 });
                 return newId;
             },
 
-            markCloudSynced: (localProfileId, cloudProfileId, cloudRevision, preserveDirty = false) => {
+            setProfileOfflineDesignated: (localProfileId, enabled) => {
+                if (!canMutateSettings()) return false;
                 const s = get();
-                const wasDirty = s.dirty;
+                const ownerUserId = accountProfileOwnerId(s.currentUser);
+                if (!ownerUserId) return false;
+                const summary = s.profiles.find(p => p.localProfileId === localProfileId);
+                if (!summary) return false;
+                const res = profileService.setOfflineDesignatedProfile(
+                    { localProfileId, name: summary.name, ownerUserId },
+                    enabled,
+                );
+                set({ offlineDesignatedProfiles: res.profiles });
+                return res.ok;
+            },
+
+            recoverLegacyProfile: async legacyProfileId => {
+                if (!canMutateSettings()) {
+                    return { ok: false, error: "Guardian access is required to recover a legacy board." };
+                }
+                const startGeneration = authGeneration;
+                const s = get();
+                const ownerUserId = accountProfileOwnerId(s.currentUser);
+                if (!ownerUserId) {
+                    return { ok: false, error: "Guardian access is required to recover a legacy board." };
+                }
+                const legacyDoc = profileService.readLegacyProfileDocument(legacyProfileId);
+                if (!legacyDoc) {
+                    return { ok: false, error: "Legacy board was not found or was already recovered." };
+                }
+
+                const targetId = `recovered-${ownerUserId.slice(0, 8)}-${legacyProfileId}`;
+                const copiedMediaIds = new Set<string>();
+                try {
+                    const mediaRecords = await mediaRepository.listProfileMedia(legacyProfileId);
+                    for (const rec of mediaRecords) {
+                        const loaded =
+                            rec.blob instanceof Blob
+                                ? rec
+                                : await mediaRepository.loadMedia(legacyProfileId, rec.mediaId);
+                        if (!loaded) {
+                            return { ok: false, error: "Could not read legacy profile photo data." };
+                        }
+                        const savedMedia = await mediaRepository.saveMedia(targetId, loaded.mediaId, loaded.blob, {
+                            mimeType: loaded.mimeType,
+                            width: loaded.width,
+                            height: loaded.height,
+                            checksum: loaded.checksum,
+                        });
+                        if (!savedMedia.ok) {
+                            return { ok: false, error: savedMedia.error ?? "Could not copy legacy profile photos." };
+                        }
+                        copiedMediaIds.add(loaded.mediaId);
+                    }
+
+                    const referencedMediaIds = new Set<string>();
+                    for (const tile of Object.values(legacyDoc.boardData.tiles)) {
+                        if (typeof tile.mediaId === "string" && tile.mediaId.length > 0) {
+                            referencedMediaIds.add(tile.mediaId);
+                        }
+                    }
+                    for (const token of legacyDoc.boardData.sentence) {
+                        if (typeof token.mediaId === "string" && token.mediaId.length > 0) {
+                            referencedMediaIds.add(token.mediaId);
+                        }
+                    }
+
+                    for (const mediaId of referencedMediaIds) {
+                        if (!copiedMediaIds.has(mediaId)) {
+                            const legacyPhoto = await mediaRepository.loadMedia(legacyProfileId, mediaId);
+                            if (legacyPhoto) {
+                                const savedMedia = await mediaRepository.saveMedia(
+                                    targetId,
+                                    legacyPhoto.mediaId,
+                                    legacyPhoto.blob,
+                                    {
+                                        mimeType: legacyPhoto.mimeType,
+                                        width: legacyPhoto.width,
+                                        height: legacyPhoto.height,
+                                        checksum: legacyPhoto.checksum,
+                                    },
+                                );
+                                if (!savedMedia.ok) {
+                                    return {
+                                        ok: false,
+                                        error: savedMedia.error ?? "Could not copy legacy profile photos.",
+                                    };
+                                }
+                                copiedMediaIds.add(mediaId);
+                            }
+                        }
+                        if (copiedMediaIds.has(mediaId)) {
+                            const verifiedPhoto = await mediaRepository.loadMedia(targetId, mediaId);
+                            if (!verifiedPhoto) {
+                                return { ok: false, error: "Could not verify recovered profile photos." };
+                            }
+                        }
+                    }
+                    for (const mediaId of copiedMediaIds) {
+                        if (!referencedMediaIds.has(mediaId)) {
+                            const verifiedPhoto = await mediaRepository.loadMedia(targetId, mediaId);
+                            if (!verifiedPhoto) {
+                                return { ok: false, error: "Could not verify recovered profile photos." };
+                            }
+                        }
+                    }
+                } catch {
+                    return { ok: false, error: "Could not copy legacy profile photos." };
+                }
+
+                if (authGeneration !== startGeneration || accountProfileOwnerId(get().currentUser) !== ownerUserId) {
+                    return { ok: false, error: "Account session changed while recovering legacy board." };
+                }
+
+                const recoveredDoc: LocalProfileDocument = {
+                    ...legacyDoc,
+                    schemaVersion: PROFILE_SCHEMA_VERSION,
+                    localProfileId: targetId,
+                    ownerUserId,
+                    dirty: true,
+                    localEditVersion: 1,
+                    lastPublishedEditVersion: 0,
+                    boardData: {
+                        ...legacyDoc.boardData,
+                        accessConfig: cleanAccessConfig(legacyDoc.boardData.accessConfig),
+                    },
+                };
+                const saveRes = profileService.saveProfileDocument(recoveredDoc);
+                if (!saveRes.ok) {
+                    return { ok: false, error: saveRes.errorMessage ?? "Could not save recovered board." };
+                }
+                const verifiedDoc = profileService.loadProfileDocument(targetId, ownerUserId).doc;
+                if (!verifiedDoc) {
+                    return { ok: false, error: "Recovered board could not be verified in local storage." };
+                }
+
+                const latest = get();
+                const recoveredSummary: ProfileSummary = {
+                    localProfileId: targetId,
+                    name: verifiedDoc.name,
+                    cloudProfileId: verifiedDoc.cloudProfileId ?? null,
+                    ownerUserId,
+                };
+                const profiles = latest.profiles.some(p => p.localProfileId === targetId)
+                    ? latest.profiles.map(p => (p.localProfileId === targetId ? recoveredSummary : p))
+                    : [...latest.profiles, recoveredSummary];
+
+                const indexRes = profileService.saveActiveIndex(
+                    {
+                        schemaVersion: PROFILE_SCHEMA_VERSION,
+                        activeProfileId: targetId,
+                        profiles,
+                    },
+                    ownerUserId,
+                );
+                if (!indexRes.ok) {
+                    return { ok: false, error: indexRes.errorMessage ?? "Could not update profile list." };
+                }
+
+                profileService.retireRecoveredLegacyProfile(legacyProfileId);
+                if (legacyProfileId !== targetId && copiedMediaIds.size > 0) {
+                    await Promise.all(
+                        Array.from(copiedMediaIds).map(mediaId => mediaRepository.removeMedia(legacyProfileId, mediaId)),
+                    ).catch(() => undefined);
+                }
+
+                persistenceBlocked = false;
+                ttsService.stop();
+                if (
+                    latest.activeProfileId !== targetId ||
+                    latest.cloudProfileId !== (verifiedDoc.cloudProfileId ?? null)
+                ) {
+                    chatSocketService.setActiveContext(null);
+                }
+                set({
+                    ...buildActivatedProfileState({
+                        doc: verifiedDoc,
+                        previousSentenceRevision: latest.sentenceRevision,
+                        profiles,
+                        storageStatus: "ok",
+                        storageError: null,
+                    }),
+                    ...refreshDiscoveryLists(latest.currentUser),
+                });
+                return { ok: true, localProfileId: targetId };
+            },
+
+            markCloudSynced: (
+                localProfileId,
+                cloudProfileId,
+                cloudRevision,
+                publishedEditVersion,
+                preserveDirty = false,
+            ) => {
+                const s = get();
                 // A publish can finish after the user switches or deletes profiles.
                 if (!s.profiles.some(p => p.localProfileId === localProfileId)) return;
+                const activeOwnerId = s.activeProfileOwnerId ?? accountProfileOwnerId(s.currentUser);
+                let summaryOwnerId = activeOwnerId;
                 if (s.activeProfileId !== localProfileId) {
-                    const loaded = profileService.loadProfileDocument(localProfileId);
+                    const loaded = profileService.loadProfileDocument(localProfileId, accountProfileOwnerId(s.currentUser));
                     if (!loaded.doc) return;
+                    const existingSummary = s.profiles.find(p => p.localProfileId === localProfileId);
+                    summaryOwnerId = loaded.doc.ownerUserId ?? existingSummary?.ownerUserId ?? activeOwnerId;
+                    const currentEditVersion = loaded.doc.localEditVersion ?? 0;
+                    const shouldClearDirty =
+                        !preserveDirty &&
+                        (publishedEditVersion === undefined || currentEditVersion === publishedEditVersion);
+                    const nextDirty = shouldClearDirty
+                        ? false
+                        : currentEditVersion !== publishedEditVersion && publishedEditVersion !== undefined
+                          ? true
+                          : Boolean(loaded.doc.dirty);
+                    const nextLastPublished = publishedEditVersion ?? currentEditVersion;
                     const saved = profileService.saveProfileDocument({
                         ...loaded.doc,
                         cloudProfileId,
                         cloudRevision,
+                        dirty: nextDirty,
+                        localEditVersion: currentEditVersion,
+                        lastPublishedEditVersion: nextLastPublished,
                     });
                     if (!saved.ok) {
                         set({ storageStatus: saved.status, storageError: saved.errorMessage ?? "Unable to save cloud profile link." });
@@ -731,72 +1459,38 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     }
                 }
                 const profiles = s.profiles.map(p =>
-                    p.localProfileId === localProfileId ? { ...p, cloudProfileId } : p,
+                    p.localProfileId === localProfileId
+                        ? { ...p, cloudProfileId, ownerUserId: summaryOwnerId }
+                        : p,
                 );
                 profileService.saveActiveIndex({
                     schemaVersion: PROFILE_SCHEMA_VERSION,
                     activeProfileId: s.activeProfileId,
                     profiles,
-                });
+                }, accountProfileOwnerId(s.currentUser));
                 set({ profiles });
                 if (s.activeProfileId === localProfileId) {
+                    const latest = get();
+                    const currentEditVersion = latest.localEditVersion;
+                    const shouldClearDirty =
+                        !preserveDirty &&
+                        (publishedEditVersion === undefined || currentEditVersion === publishedEditVersion);
+                    const nextDirty = shouldClearDirty
+                        ? false
+                        : currentEditVersion !== publishedEditVersion && publishedEditVersion !== undefined
+                          ? true
+                          : latest.dirty;
+                    const nextLastPublished = publishedEditVersion ?? currentEditVersion;
                     set({ cloudProfileId, cloudRevision });
-                    persistCurrent(extractBoardData(get()));
-                    if (preserveDirty && wasDirty) {
-                        set({ dirty: true });
-                    }
+                    persistCurrent(extractBoardData(get()), {
+                        dirty: nextDirty,
+                        localEditVersion: currentEditVersion,
+                        lastPublishedEditVersion: nextLastPublished,
+                    });
                 }
             },
 
             clearStorageError: () => set({ storageError: null }),
-
-            unlockEditSession: async pin => {
-                const s = get();
-                if (s.currentUser?.role === "CHILD") {
-                    return { ok: false, error: "Guardian access required" };
-                }
-                const verifier = s.accessConfig.pinVerifier;
-                if (!verifier || isGuardianRole(s.currentUser?.role)) {
-                    resetPinAttempts();
-                    set({ isEditUnlocked: true });
-                    return { ok: true };
-                }
-                if (Date.now() < pinLockoutUntil) {
-                    return {
-                        ok: false,
-                        error: "Too many failed PIN attempts. Please wait a moment and try again.",
-                    };
-                }
-                if (!pin || !(await verifyPin(pin, verifier))) {
-                    failedPinAttempts += 1;
-                    if (failedPinAttempts >= 5) {
-                        pinLockoutUntil = Date.now() + 15_000;
-                        failedPinAttempts = 0;
-                    }
-                    return { ok: false, error: "Incorrect PIN" };
-                }
-                resetPinAttempts();
-                set({ isEditUnlocked: true });
-                return { ok: true };
-            },
-
-            lockEditSession: () => set({ isEditUnlocked: false }),
-
-            setEditPin: async pin => {
-                if (!canMutateSettings()) return false;
-                const trimmed = pin?.trim() ?? "";
-                if (trimmed && !/^\d{4,12}$/.test(trimmed)) return false;
-                try {
-                    const verifier = trimmed ? await createPinVerifier(trimmed) : null;
-                    const data = extractBoardData(get());
-                    data.accessConfig = { ...data.accessConfig, editPin: null, pinVerifier: verifier };
-                    if (!persistCurrent(data)) return false;
-                    set({ accessConfig: data.accessConfig, isEditUnlocked: true });
-                    return true;
-                } catch {
-                    return false;
-                }
-            },
 
             setGridConfig: (grid, id) =>
                 mutateBoard(d => {
@@ -893,11 +1587,13 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
             setSpeechConfig: patch => {
                 const keys = Object.keys(patch);
                 const volumeOnly = keys.length === 1 && keys[0] === "volume";
+                const markCloudModified = !(volumeOnly && !canMutateSettings());
                 return mutateBoard(
                     d => {
                         d.speechConfig = { ...d.speechConfig, ...patch };
                     },
                     !volumeOnly,
+                    markCloudModified,
                 );
             },
 
@@ -1127,53 +1823,78 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                         ...(d.experimentalData ?? {}),
                         scribbleDrafts: [...prev, trimmed],
                     };
-                }, false);
+                }, false, false);
             },
 
-            addChatMessage: (sender, text) => {
+            addChatMessage: (sender, text, context, id) => {
                 const trimmed = text.trim();
-                if (!trimmed) return null;
+                if (!trimmed || (context && !matchesChatBindingContext(get(), context))) return null;
                 const message: ChatMessage = {
-                    id: uid(),
+                    id,
                     sender,
                     text: trimmed,
+                    createdAt: new Date().toISOString(),
+                    ...(context ? { pendingContext: { ...context } } : {}),
                 };
-                mutateBoard(d => {
-                    const prev = d.experimentalData?.chatMessages ?? [];
-                    d.experimentalData = {
-                        ...(d.experimentalData ?? {}),
-                        chatMessages: [...prev, message],
-                    };
-                }, false);
+                const data = extractBoardData(get());
+                const prev = data.experimentalData?.chatMessages ?? [];
+                data.experimentalData = {
+                    ...(data.experimentalData ?? {}),
+                    chatMessages: sortChatMessages([...prev, message]),
+                };
+                if (!persistCurrent(data)) return null;
+                set({ ...data });
                 return message;
             },
 
-            receiveChatMessages: incoming => {
-                if (!Array.isArray(incoming) || incoming.length === 0) return;
-                const existing = get().experimentalData?.chatMessages ?? [];
-                const existingIds = new Set(existing.map(m => m.id));
-                const fresh: ChatMessage[] = [];
-                for (const item of incoming) {
-                    if (isValidChatMessage(item) && !existingIds.has(item.id)) {
-                        existingIds.add(item.id);
-                        fresh.push(item);
-                    }
-                }
-                if (fresh.length === 0) return;
+            dismissLegacyChatMessages: () => {
+                const data = extractBoardData(get());
+                const prev = data.experimentalData?.chatMessages ?? [];
+                data.experimentalData = { ...(data.experimentalData ?? {}), chatMessages: prev.filter(m => m.verified === true || m.pendingContext) };
+                if (!persistCurrent(data)) return false;
+                set({ ...data });
+                return true;
+            },
+
+            receiveChatMessages: (incoming, context) => {
+                if (!Array.isArray(incoming) || !context || !matchesChatBindingContext(get(), context)) return;
+                const verified = incoming.filter(item => isValidChatMessage(item) && item.verified === true);
+                if (!verified.length) return;
                 mutateBoard(d => {
-                    const prev = d.experimentalData?.chatMessages ?? [];
-                    const mergedById = new Map<string, ChatMessage>();
-                    for (const msg of prev) {
-                        mergedById.set(msg.id, msg);
-                    }
-                    for (const msg of fresh) {
-                        mergedById.set(msg.id, msg);
-                    }
+                    const merged = new Map((d.experimentalData?.chatMessages ?? []).map(m => [m.id, m]));
+                    for (const msg of verified) merged.set(msg.id, { ...msg, pendingContext: undefined });
                     d.experimentalData = {
                         ...(d.experimentalData ?? {}),
-                        chatMessages: Array.from(mergedById.values()),
+                        chatMessages: sortChatMessages(Array.from(merged.values())),
                     };
-                }, false);
+                }, false, false);
+            },
+
+            markChatRead: () => {
+                const state = get();
+                if (!state.currentUser) return;
+                const scopeKey = chatReadScopeKey(
+                    state.currentUser.id,
+                    state.activeProfileId,
+                    state.cloudProfileId,
+                );
+                let latestMsgTs = -Infinity;
+                for (const m of state.experimentalData?.chatMessages ?? []) {
+                    if (m.verified !== true || !m.createdAt) continue;
+                    const ts = Date.parse(m.createdAt);
+                    if (Number.isFinite(ts) && ts > latestMsgTs) {
+                        latestMsgTs = ts;
+                    }
+                }
+                const existingRaw = state.chatLastReadAt[scopeKey];
+                const existingTs = existingRaw ? Date.parse(existingRaw) : NaN;
+                if (existingRaw && Number.isFinite(existingTs) && existingTs >= latestMsgTs) {
+                    return;
+                }
+                const nextIso = new Date(Math.max(Date.now(), latestMsgTs)).toISOString();
+                const nextMap = { ...state.chatLastReadAt, [scopeKey]: nextIso };
+                writeChatLastReadMap(nextMap);
+                set({ chatLastReadAt: nextMap });
             },
 
             togglePinnedTile: tileId =>

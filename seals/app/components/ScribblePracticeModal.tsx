@@ -38,7 +38,7 @@ function traceBadgeTone(score: number | null): { bar: string; pill: string; text
     };
 }
 
-export default function ScribblePracticeModal({ onClose }: { onClose: () => void }) {
+export default function ScribblePracticeModal({ onClose }: { onClose?: () => void } = {}) {
     const { canvasRef, state: s, actions: a } = useScribblePracticeViewModel(onClose);
     const activeEngine = ENGINE_OPTIONS.find(opt => opt.value === s.engine) ?? ENGINE_OPTIONS[0];
     const recentDrafts = Array.from(new Set(s.drafts.slice().reverse())).slice(0, 6);
@@ -112,7 +112,7 @@ export default function ScribblePracticeModal({ onClose }: { onClose: () => void
 
                     <button
                         type="button"
-                        onClick={onClose}
+                        onClick={a.onClose}
                         aria-label="Close scribble practice"
                         className="w-7 h-7 rounded-full hover:bg-white/15 flex items-center justify-center text-white/90 hover:text-white transition-colors shrink-0 cursor-pointer"
                     >

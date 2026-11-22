@@ -64,14 +64,16 @@ export async function exportProfilePackage(
         layoutMode: boardData.layoutMode,
         tileAppearance: boardData.tileAppearance,
         speechConfig: boardData.speechConfig,
-        accessConfig: boardData.accessConfig,
+        accessConfig: {
+            longPressToEdit: boardData.accessConfig.longPressToEdit,
+            holdDurationMs: boardData.accessConfig.holdDurationMs,
+            moveTolerancePx: boardData.accessConfig.moveTolerancePx,
+            swipeThresholdPx: boardData.accessConfig.swipeThresholdPx,
+        },
         featureFlags: boardData.featureFlags,
         ...(boardData.experimentalData ? { experimentalData: boardData.experimentalData } : {}),
         sentence: boardData.sentence,
     });
-    // Never export unlock credentials or account tokens.
-    sanitized.accessConfig.editPin = null;
-    sanitized.accessConfig.pinVerifier = null;
 
     const referencedIds = new Set<string>();
     for (const tile of Object.values(sanitized.tiles)) {
@@ -202,8 +204,6 @@ export async function validateAndPrepareImport(
         return { ok: false, error: error instanceof Error ? error.message : "Failed to store imported media." };
     }
 
-    sanitizedBoard.accessConfig.editPin = null;
-    sanitizedBoard.accessConfig.pinVerifier = null;
 
     return {
         ok: true,

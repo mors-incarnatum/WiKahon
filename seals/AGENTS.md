@@ -14,6 +14,8 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 3. Drastic changes require explicit permission.
 4. Do not read .env
 5. Do not make tests
+6. Make use of Supabase skills
+7. Each listed implementation task will automatically be assigned to a subagent: For Gemini use Hydrogen High, Codex Equivalent will use Terra High.
 <!-- END:project-rules -->
 
 <!-- BEGIN:project-architecture -->
@@ -57,50 +59,8 @@ This project strictly adheres to the **Model-View-ViewModel (MVVM)** pattern ada
   1. Route pages (`app/**/page.tsx`) must remain minimal: handle parameter resolution (`generateStaticParams`, params unwrapping), route guards, and render the corresponding top-level View.
   2. No inline business logic or heavy component composition inside `page.tsx` files.
 
----
 
-## 2. Directory Structure Conventions
-
-When adding or refactoring features, organize code within these designated directories:
-
-```text
-seals/
-├── app/                  # Next.js App Router (Routing, Layouts, Metadata only)
-│   ├── board/
-│   │   ├── layout.tsx
-│   │   ├── page.tsx
-│   │   └── [categoryId]/page.tsx
-│   └── globals.css
-├── components/           # View Layer (Pure JSX, styling, ARIA)
-│   ├── BoardShell.tsx
-│   ├── HomeBoard.tsx
-│   ├── CategoryBoard.tsx
-│   ├── EditableTileSlot.tsx
-│   ├── TileButton.tsx
-│   ├── CategoryWheel.tsx
-│   └── WordPicker.tsx
-├── viewmodels/           # ViewModel Layer (Headless React Hooks)
-│   ├── useBoardShellViewModel.ts
-│   ├── useHomeBoardViewModel.ts
-│   ├── useCategoryBoardViewModel.ts
-│   ├── useTileSlotViewModel.ts
-│   ├── useCategoryWheelViewModel.ts
-│   └── useWordPickerViewModel.ts
-├── models/               # Domain Entities & Types (Plain TS / JSON)
-│   ├── board.ts
-│   └── Words.json
-├── services/             # Hardware, Cloud & External Adapters
-│   └── tts/
-│       ├── ttsService.ts (Interface & Implementations)
-│       └── ttsClient.ts
-└── store/                # Data Store / State Persistence (Zustand)
-    ├── useBoardStore.ts
-    └── BoardProvider.tsx
-```
-
----
-
-## 3. AAC-Specific Engineering Directives
+## 2. AAC-Specific Engineering Directives
 
 1. **Speech Pipeline:** Never trigger TTS directly from a button click handler. Speech requests must flow through ViewModel commands to allow queueing, active word highlights, and volume normalization.
 2. **Offline-First:** All AAC communication features (speech, custom board personalization, navigation) must handle offline environments gracefully without uncaught exceptions.

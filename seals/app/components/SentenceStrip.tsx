@@ -74,7 +74,13 @@ export default function SentenceStrip() {
                         Stop
                     </button>
                 )}
-                <button type="button" disabled={s.isEmpty} onClick={a.backspace} aria-label="Backspace">
+                <button
+                    type="button"
+                    className="min-w-[44px] min-h-[44px] inline-flex items-center justify-center"
+                    disabled={s.isEmpty}
+                    onClick={a.backspace}
+                    aria-label="Delete last word"
+                >
                     ⌫
                 </button>
                 <button
@@ -87,7 +93,13 @@ export default function SentenceStrip() {
                 >
                     ↶ Undo
                 </button>
-                <button type="button" disabled={s.isEmpty} onClick={a.clear} aria-label="Clear sentence">
+                <button
+                    type="button"
+                    className="min-w-[44px] min-h-[44px] inline-flex items-center justify-center"
+                    disabled={s.isEmpty}
+                    onClick={a.clear}
+                    aria-label="Clear sentence"
+                >
                     ✕
                 </button>
             </div>

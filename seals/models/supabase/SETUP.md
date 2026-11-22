@@ -61,10 +61,8 @@ and cross-device restore remain separate work.
   import/sync operation should validate the complete graph and clean up dangling
   placements when deleting tiles. Never combine rows from different profiles.
 - Settings mirror the local grid, appearance, speech and gesture settings.
-  `editPin` and the current sentence are device-local and excluded from the
-  cloud contract. The edit PIN is a UI convenience, not Supabase authorization.
-  On restore, retain local `sentence` and merge cloud `accessConfig` into the
-  local access config to retain the device's PIN.
+  The current sentence is device-local and excluded from the cloud contract.
+  Legacy PIN fields are excluded from cloud data and ignored when loading profiles.
 - `MODELS/supabase/database.types.ts` supplies Row/Insert/Update contracts and foreign-key
   relationships. `MODELS/supabase/mappers.ts` validates JSONB and converts snake_case rows
   to the existing domain shapes. After schema changes, regenerate database types

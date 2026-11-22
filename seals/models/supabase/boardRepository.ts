@@ -30,7 +30,7 @@ export const PROFILE_MEDIA_BUCKET = "profile-media";
 /** Explicit persistence operations. Callers handle errors and retain their local data. */
 export interface IBoardRepository {
     listProfiles(): Promise<ProfileRow[]>;
-    createProfile(name: string): Promise<ProfileRow>;
+    createProfile(name: string, ownerId: string): Promise<ProfileRow>;
     listMemberships(profileId: string): Promise<ProfileMembershipRow[]>;
     setMembership(profileId: string, userId: string, role: ProfileMemberRole): Promise<void>;
     removeMembership(profileId: string, userId: string): Promise<void>;
@@ -62,8 +62,8 @@ export class SupabaseBoardRepository implements IBoardRepository {
             this.client.from("profiles").select("*").order("id").range(from, to).throwOnError(),
         );
     }
-    async createProfile(name: string) {
-        const { data } = await this.client.from("profiles").insert({ name }).select().single().throwOnError();
+    async createProfile(name: string, ownerId: string) {
+        const { data } = await this.client.from("profiles").insert({ name, owner_id: ownerId }).select().single().throwOnError();
         return data!;
     }
     async listMemberships(profileId: string) {
@@ -210,8 +210,14 @@ export class SupabaseBoardRepository implements IBoardRepository {
         const path = `${profileId}/${mediaId}`;
         const { error } = await this.client.storage
             .from(PROFILE_MEDIA_BUCKET)
-            .upload(path, blob, { upsert: true, contentType: mimeType });
-        if (error) throw error;
+            .upload(path, blob, { upsert: false, contentType: mimeType });
+        if (error) {
+            const statusCode = (error as { statusCode?: string | number }).statusCode;
+            if (String(statusCode) === "409" || /already exists|Duplicate/i.test(error.message ?? "")) {
+                return;
+            }
+            throw error;
+        }
     }
     async downloadProfileMedia(profileId: string, mediaId: string): Promise<Blob | null> {
         if (!isValidMediaId(mediaId)) return null;
