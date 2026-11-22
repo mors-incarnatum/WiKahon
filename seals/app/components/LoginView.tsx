@@ -14,6 +14,61 @@ function FieldErrors({ errors }: { errors?: string[] }) {
     );
 }
 
+function PasswordField({
+    id,
+    label,
+    name,
+    autoComplete,
+    value,
+    visible,
+    placeholder,
+    errors,
+    toggleLabel,
+    onChange,
+    onToggleVisible,
+}: {
+    id: string;
+    label: string;
+    name: string;
+    autoComplete: string;
+    value: string;
+    visible: boolean;
+    placeholder: string;
+    errors?: string[];
+    toggleLabel: string;
+    onChange: (value: string) => void;
+    onToggleVisible: () => void;
+}) {
+    return (
+        <div className="block text-sm font-semibold text-slate-800">
+            <label htmlFor={id}>{label}</label>
+            <div className="relative mt-1">
+                <input
+                    id={id}
+                    type={visible ? "text" : "password"}
+                    name={name}
+                    autoComplete={autoComplete}
+                    value={value}
+                    aria-invalid={Boolean(errors?.length)}
+                    onChange={e => onChange(e.target.value)}
+                    placeholder={placeholder}
+                    className="w-full px-3 py-2 pr-16 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
+                />
+                <button
+                    type="button"
+                    onClick={onToggleVisible}
+                    aria-label={toggleLabel}
+                    aria-pressed={visible}
+                    className="absolute inset-y-0 right-0 flex items-center px-3 text-xs font-semibold text-slate-700 hover:text-slate-900"
+                >
+                    {visible ? "Hide" : "Show"}
+                </button>
+            </div>
+            <FieldErrors errors={errors} />
+        </div>
+    );
+}
+
 export default function LoginView({ initialMode = "login" }: { initialMode?: AuthMode } = {}) {
     const { state: s, actions: a } = useAuthViewModel(initialMode);
 
@@ -25,9 +80,6 @@ export default function LoginView({ initialMode = "login" }: { initialMode?: Aut
                 <div className="brand">
                     <b>W</b> WiKahon
                 </div>
-                <span className="text-xs text-slate-600">
-                    Active board profile: <strong>{s.activeProfileName}</strong>
-                </span>
             </header>
 
             <main className="flex-1 flex items-center justify-center p-4">
@@ -73,13 +125,23 @@ export default function LoginView({ initialMode = "login" }: { initialMode?: Aut
                             : "Create a Parent or Caregiver account to manage AAC boards and cloud sync. Child accounts are provisioned by a guardian or can use Offline Child Mode below."}
                     </p>
 
-                    {s.infoMessage && (
-                        <p
+                    {(s.infoMessage || s.pendingConfirmationEmail) && (
+                        <div
                             role="status"
-                            className="mt-4 text-sm text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2"
+                            className="mt-4 text-sm text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2 space-y-2"
                         >
-                            {s.infoMessage}
-                        </p>
+                            {s.infoMessage && <p>{s.infoMessage}</p>}
+                            {s.pendingConfirmationEmail && (
+                                <button
+                                    type="button"
+                                    disabled={s.isResending}
+                                    onClick={() => void a.resendConfirmation()}
+                                    className="px-3 py-1.5 text-xs font-semibold rounded-md border border-emerald-700 bg-white text-emerald-900 hover:bg-emerald-100 disabled:opacity-60"
+                                >
+                                    {s.isResending ? "Sending…" : "Resend confirmation email"}
+                                </button>
+                            )}
+                        </div>
                     )}
 
                     {s.mode === "login" ? (
@@ -106,20 +168,19 @@ export default function LoginView({ initialMode = "login" }: { initialMode?: Aut
                                 <FieldErrors errors={s.fieldErrors.identifier} />
                             </label>
 
-                            <label className="block text-sm font-semibold text-slate-800">
-                                Password
-                                <input
-                                    type="password"
-                                    name="password"
-                                    autoComplete="current-password"
-                                    value={s.password}
-                                    aria-invalid={Boolean(s.fieldErrors.password?.length)}
-                                    onChange={e => a.setPassword(e.target.value)}
-                                    placeholder="Enter password"
-                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
-                                />
-                                <FieldErrors errors={s.fieldErrors.password} />
-                            </label>
+                            <PasswordField
+                                id="login-password"
+                                label="Password"
+                                name="password"
+                                autoComplete="current-password"
+                                value={s.password}
+                                visible={s.showPassword}
+                                placeholder="Enter password"
+                                errors={s.fieldErrors.password}
+                                toggleLabel={s.showPassword ? "Hide password" : "Show password"}
+                                onChange={a.setPassword}
+                                onToggleVisible={a.toggleShowPassword}
+                            />
 
                             <div className="text-right">
                                 <Link href="/forgot-password" className="text-sm font-semibold text-blue-700 hover:underline">
@@ -162,7 +223,7 @@ export default function LoginView({ initialMode = "login" }: { initialMode?: Aut
                                     value={s.name}
                                     aria-invalid={Boolean(s.fieldErrors.name?.length)}
                                     onChange={e => a.setName(e.target.value)}
-                                    placeholder="e.g., Lily Santos"
+                                    placeholder="e.g., Maria Santos"
                                     className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
                                 />
                                 <FieldErrors errors={s.fieldErrors.name} />
@@ -177,7 +238,7 @@ export default function LoginView({ initialMode = "login" }: { initialMode?: Aut
                                     value={s.username}
                                     aria-invalid={Boolean(s.fieldErrors.username?.length)}
                                     onChange={e => a.setUsername(e.target.value)}
-                                    placeholder="e.g., lily"
+                                    placeholder="e.g., maria.santos"
                                     className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
                                 />
                                 <FieldErrors errors={s.fieldErrors.username} />
@@ -213,35 +274,33 @@ export default function LoginView({ initialMode = "login" }: { initialMode?: Aut
                                 <FieldErrors errors={s.fieldErrors.role} />
                             </label>
 
-                            <label className="block text-sm font-semibold text-slate-800">
-                                Password (min 8 chars, letter & number)
-                                <input
-                                    type="password"
-                                    name="password"
-                                    autoComplete="new-password"
-                                    value={s.password}
-                                    aria-invalid={Boolean(s.fieldErrors.password?.length)}
-                                    onChange={e => a.setPassword(e.target.value)}
-                                    placeholder="Enter password"
-                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
-                                />
-                                <FieldErrors errors={s.fieldErrors.password} />
-                            </label>
+                            <PasswordField
+                                id="signup-password"
+                                label="Password (min 8 chars, letter & number)"
+                                name="password"
+                                autoComplete="new-password"
+                                value={s.password}
+                                visible={s.showPassword}
+                                placeholder="Enter password"
+                                errors={s.fieldErrors.password}
+                                toggleLabel={s.showPassword ? "Hide password" : "Show password"}
+                                onChange={a.setPassword}
+                                onToggleVisible={a.toggleShowPassword}
+                            />
 
-                            <label className="block text-sm font-semibold text-slate-800">
-                                Confirm password
-                                <input
-                                    type="password"
-                                    name="confirmPassword"
-                                    autoComplete="new-password"
-                                    value={s.confirmPassword}
-                                    aria-invalid={Boolean(s.fieldErrors.confirmPassword?.length)}
-                                    onChange={e => a.setConfirmPassword(e.target.value)}
-                                    placeholder="Re-enter password"
-                                    className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
-                                />
-                                <FieldErrors errors={s.fieldErrors.confirmPassword} />
-                            </label>
+                            <PasswordField
+                                id="signup-confirm-password"
+                                label="Confirm password"
+                                name="confirmPassword"
+                                autoComplete="new-password"
+                                value={s.confirmPassword}
+                                visible={s.showConfirmPassword}
+                                placeholder="Re-enter password"
+                                errors={s.fieldErrors.confirmPassword}
+                                toggleLabel={s.showConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                                onChange={a.setConfirmPassword}
+                                onToggleVisible={a.toggleShowConfirmPassword}
+                            />
 
                             {s.error && (
                                 <p
@@ -263,6 +322,40 @@ export default function LoginView({ initialMode = "login" }: { initialMode?: Aut
                     )}
 
                     <div className="mt-5 pt-4 border-t border-slate-200 space-y-3">
+                        {s.offlineDesignatedProfiles.length > 1 ? (
+                            <div className="space-y-2">
+                                <label className="block text-sm font-semibold text-slate-800">
+                                    Offline Child Board
+                                    <select
+                                        name="offlineProfileId"
+                                        value={s.selectedOfflineProfileId}
+                                        onChange={e => a.setSelectedOfflineProfileId(e.target.value)}
+                                        className="mt-1 w-full px-3 py-2 border border-slate-400 rounded-md bg-white text-slate-900 font-normal"
+                                    >
+                                        {s.offlineDesignatedProfiles.map(profile => (
+                                            <option key={profile.localProfileId} value={profile.localProfileId}>
+                                                {profile.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </label>
+                                <button
+                                    type="button"
+                                    onClick={() => a.enterOfflineChildMode(s.selectedOfflineProfileId)}
+                                    className="w-full py-2.5 px-4 rounded-md font-semibold text-sm border border-slate-400 bg-slate-100 text-slate-900 hover:bg-slate-200"
+                                >
+                                    Continue in Offline Child Mode
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => a.enterOfflineChildMode(s.offlineDesignatedProfiles[0]?.localProfileId)}
+                                className="w-full py-2.5 px-4 rounded-md font-semibold text-sm border border-slate-400 bg-slate-100 text-slate-900 hover:bg-slate-200"
+                            >
+                                Continue in Offline Child Mode
+                            </button>
+                        )}
                         <p className="text-xs text-slate-600 text-center">
                             Zod Schema Validation · Supabase Auth Session · Offline Local AAC Mode
                         </p>

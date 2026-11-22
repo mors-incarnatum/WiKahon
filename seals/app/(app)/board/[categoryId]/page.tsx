@@ -8,5 +8,11 @@ export default async function CategoryPage({ params }: {
     }>;
 }) {
     const { categoryId } = await params;
-    return <CategoryBoard key={categoryId} categoryId={categoryId}/>;
+    let decodedCategoryId = categoryId;
+    try {
+        decodedCategoryId = decodeURIComponent(categoryId);
+    } catch {
+        decodedCategoryId = categoryId;
+    }
+    return <CategoryBoard key={decodedCategoryId} categoryId={decodedCategoryId} />;
 }

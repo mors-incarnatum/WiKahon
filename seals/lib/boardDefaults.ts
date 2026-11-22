@@ -29,6 +29,16 @@ import {
     TileSchema,
 } from "@/lib/boardSchemas";
 
+function buildDefaultHomeCells(): CatalogBoard["pages"][number]["cells"] {
+    const cells: CatalogBoard["pages"][number]["cells"] = {};
+    for (let i = 0; i < 20; i++) {
+        cells[cellKey(Math.floor(i / 4), i % 4)] = {
+            tileId: INITIAL_DICTIONARY[CATEGORY_IDS[i % 4]][Math.floor(i / 4)].id,
+        };
+    }
+    return cells;
+}
+
 export function initialData(): BoardData {
     const tiles: Record<string, Tile> = {};
     const boards: Record<string, CatalogBoard> = {};
@@ -49,12 +59,6 @@ export function initialData(): BoardData {
             pages: [{ cells }],
         };
     });
-    const cells: CatalogBoard["pages"][number]["cells"] = {};
-    for (let i = 0; i < 20; i++) {
-        cells[cellKey(Math.floor(i / 4), i % 4)] = {
-            tileId: INITIAL_DICTIONARY[CATEGORY_IDS[i % 4]][Math.floor(i / 4)].id,
-        };
-    }
     boards.home = {
         id: "home",
         name: "Home",
@@ -62,7 +66,7 @@ export function initialData(): BoardData {
         colorKey: "slate",
         iconName: null,
         isBuiltIn: true,
-        pages: [{ cells }],
+        pages: [{ cells: buildDefaultHomeCells() }],
     };
     return {
         tiles,
@@ -180,16 +184,48 @@ export function readColorSystem(value: unknown): ColorSystemId {
         : "custom";
 }
 
+const PRESET_CATALOG_TILES: Record<Exclude<ColorSystemId, "custom">, Record<string, string[]>> = {
+    modifiedFitzgerald: {
+        "mf-pronouns": ["p-1", "p-2", "p-3", "p-4", "p-5"],
+        "mf-verbs": ["n-1", "n-2", "n-5"],
+        "mf-descriptors": ["f-1", "f-2", "f-3", "f-4", "f-5"],
+        "mf-nouns": ["n-3"],
+        "mf-social": ["a-1", "a-2", "a-4"],
+        "mf-little": ["a-3", "a-5"],
+        "mf-places": ["n-4"],
+    },
+    tobiiDynavox: {
+        "td-pronouns": ["p-1", "p-2", "p-3", "p-4", "p-5"],
+        "td-verbs": ["n-1", "n-2", "n-5"],
+        "td-little": ["a-1", "a-2", "a-3", "a-4", "a-5"],
+        "td-descriptors": ["f-1", "f-2", "f-3", "f-4", "f-5"],
+        "td-fringe": ["n-3", "n-4"],
+    },
+};
+
+function buildCellsFromTileIds(tileIds: string[]): CatalogBoard["pages"][number]["cells"] {
+    const cells: CatalogBoard["pages"][number]["cells"] = {};
+    tileIds.forEach((tileId, i) => {
+        cells[cellKey(Math.floor(i / 4), i % 4)] = { tileId };
+    });
+    return cells;
+}
+
 export function createPresetCatalogLayout(system: Exclude<ColorSystemId, "custom">): CatalogLayout {
     const specs = system === "modifiedFitzgerald" ? MODIFIED_FITZGERALD_CATALOGS : TOBII_DYNAVOX_CATALOGS;
+    const mapping = PRESET_CATALOG_TILES[system];
     const boards: CatalogLayout["boards"] = {
         home: {
             id: "home", name: "Home", shortName: "Home", colorKey: "slate",
-            iconName: null, isBuiltIn: true, pages: [{ cells: {} }],
+            iconName: null, isBuiltIn: true, pages: [{ cells: buildDefaultHomeCells() }],
         },
     };
     for (const spec of specs) {
-        boards[spec.id] = { ...spec, isBuiltIn: true, pages: [{ cells: {} }] };
+        boards[spec.id] = {
+            ...spec,
+            isBuiltIn: true,
+            pages: [{ cells: buildCellsFromTileIds(mapping[spec.id] ?? []) }],
+        };
     }
     return { boards, catalogOrder: specs.map(spec => spec.id) };
 }

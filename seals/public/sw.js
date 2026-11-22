@@ -1,12 +1,12 @@
-const CACHE_NAME = "wikahon-shell-v4";
+const CACHE_NAME = "wikahon-shell-v5";
 
 const CORE_ROUTES = [
-    "/",
     "/board",
     "/board/needs",
     "/board/actions",
     "/board/people",
     "/board/feelings",
+    "/login",
 ];
 
 const STATIC_SYMBOLS = [
@@ -87,13 +87,13 @@ self.addEventListener("fetch", event => {
                 .catch(async () => {
                     const cached = await caches.match(req);
                     if (cached) return cached;
-                    // Fallback to /board shell so custom offline folders resolve via client store.
-                    if (url.pathname.startsWith("/board")) {
-                        const boardShell = await caches.match("/board");
-                        if (boardShell) return boardShell;
+                    if (/^\/(?:login|register)(?:\/|$)/.test(url.pathname)) {
+                        const loginShell = await caches.match("/login");
+                        if (loginShell) return loginShell;
                     }
-                    const rootShell = await caches.match("/");
-                    return rootShell || new Response("Offline", { status: 503 });
+                    // Fallback to /board shell so custom offline folders and app routes resolve via client store.
+                    const boardShell = await caches.match("/board");
+                    return boardShell || new Response("Offline", { status: 503 });
                 }),
         );
         return;

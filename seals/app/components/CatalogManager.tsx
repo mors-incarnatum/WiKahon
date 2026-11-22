@@ -1,7 +1,8 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
+import { useEffect, useRef } from "react";
 import Link from "next/link";
-import { ICONS, iconPath, COLOR_SYSTEMS } from "@/lib/board";
+import { ICONS, SPEECH_ICON_NAME, iconPath, isSpeechIcon, COLOR_SYSTEMS } from "@/lib/board";
 import { palette, COLOR_KEYS } from "@/app/theme";
 import { useCatalogManagerViewModel } from "@/viewmodels/useCatalogManagerViewModel";
 import { useEditContext } from "@/viewmodels/useEditModeViewModel";
@@ -13,6 +14,13 @@ export default function CatalogManager({ onClose }: { onClose: () => void }) {
     const edit = useEditContext();
     const canManage = edit.state.isGuardian;
     const isPreset = s.colorSystem !== "custom";
+    const formRef = useRef<HTMLDivElement | null>(null);
+
+    useEffect(() => {
+        if (s.selected) {
+            formRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+    }, [s.selected]);
 
     return (
         <Modal
@@ -47,12 +55,16 @@ export default function CatalogManager({ onClose }: { onClose: () => void }) {
                     const p = palette[b.colorKey];
                     const src = iconPath(b.iconName);
                     const count = b.pages.reduce((sum, page) => sum + Object.keys(page.cells).length, 0);
-                    const onHome = s.homePlacements.has(`folder-${b.id}`);
+                    const onHome = s.homeCatalogIds.has(b.id);
                     return (
                         <div key={b.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-sm">
-                            <Link href={`/board/${b.id}`} onClick={onClose} className="flex items-center gap-3">
+                            <Link href={`/board/${encodeURIComponent(b.id)}`} onClick={onClose} className="flex items-center gap-3">
                                 <span className="flex h-11 w-11 items-center justify-center rounded-xl border-2" style={{ background: p.bg, borderColor: p.border }}>
-                                    {src && <img src={src} alt="" className="h-7 w-7 object-contain" />}
+                                    {isSpeechIcon(b.iconName) ? (
+                                        <span aria-hidden="true" className="text-xl">💬</span>
+                                    ) : (
+                                        src && <img src={src} alt="" className="h-7 w-7 object-contain" />
+                                    )}
                                 </span>
                                 <span>
                                     <span className="block font-heading font-bold">
@@ -66,9 +78,23 @@ export default function CatalogManager({ onClose }: { onClose: () => void }) {
                                     <button type="button" onClick={() => a.setAdding(b.id)} className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-2.5 text-xs font-bold">
                                         <span aria-hidden="true">+</span> Words
                                     </button>
-                                    <button type="button" onClick={() => a.placeFolder(b.id)} disabled={onHome} className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-2.5 text-xs font-bold disabled:bg-[#DDF1E3]">
-                                        <span aria-hidden="true">▰</span> {onHome ? "On Home" : "To Home"}
-                                    </button>
+                                    {onHome ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => a.removeFolderFromHome(b.id)}
+                                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-[#DDF1E3] px-2.5 text-xs font-bold"
+                                        >
+                                            <span aria-hidden="true">▰</span> Remove from Home
+                                        </button>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={() => a.placeFolder(b.id)}
+                                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-2.5 text-xs font-bold"
+                                        >
+                                            <span aria-hidden="true">▰</span> To Home
+                                        </button>
+                                    )}
                                     <button type="button" onClick={() => a.reorder(b.id, -1)} disabled={index === 0} aria-label={`Move ${b.name} earlier`} className="rounded-lg border border-slate-200 p-2 disabled:opacity-30">
                                         <span aria-hidden="true">↑</span>
                                     </button>
@@ -85,9 +111,9 @@ export default function CatalogManager({ onClose }: { onClose: () => void }) {
                         </div>
                     );
                 })}
-                <p role="status">{s.message}</p>
+                {s.message && <p role="status">{s.message}</p>}
                 {canManage && !isPreset && s.selected && (
-                    <div className="space-y-3 rounded-2xl border border-slate-200 bg-[#FFF9EC]/70 p-4">
+                    <div ref={formRef} className="space-y-3 rounded-2xl border border-slate-200 bg-[#FFF9EC]/70 p-4">
                         <div className="flex justify-between">
                             <h3 className="font-heading text-xs font-bold uppercase">{s.selected === "new" ? "Create catalog" : "Edit catalog"}</h3>
                             <button type="button" onClick={a.reset} className="text-xs font-semibold">Cancel</button>
@@ -116,6 +142,10 @@ export default function CatalogManager({ onClose }: { onClose: () => void }) {
                             <legend className="text-xs">Icon</legend>
                             <div className="grid max-h-28 grid-cols-6 gap-1.5 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 sm:grid-cols-8">
                                 <button type="button" aria-pressed={s.iconName === null} onClick={() => a.setIcon(null)} className="text-xs">Text only</button>
+                                <button type="button" aria-label="Speech" aria-pressed={isSpeechIcon(s.iconName)} onClick={() => a.setIcon(SPEECH_ICON_NAME)}
+                                    className={`flex items-center justify-center rounded-lg border p-1.5 text-base ${isSpeechIcon(s.iconName) ? "border-[#B6D8FA] bg-[#DCEEFF]" : "border-transparent"}`}>
+                                    💬
+                                </button>
                                 {ICONS.map(icon => (
                                     <button key={icon.name} type="button" aria-label={icon.label} aria-pressed={s.iconName === icon.name} onClick={() => a.setIcon(icon.name)}
                                         className={`flex justify-center rounded-lg border p-1.5 ${s.iconName === icon.name ? "border-[#B6D8FA] bg-[#DCEEFF]" : "border-transparent"}`}>

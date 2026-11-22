@@ -131,6 +131,8 @@ export interface BoardState extends BoardData {
 
     // Tile & catalog commands (W02, W03, W06, W07)
     upsertTile: (tile: Tile) => boolean;
+    deleteTile: (tileId: string) => boolean;
+    addBoardPage: (boardId: string) => boolean;
     assignSlot: (boardId: string, page: number, cell: CellKey, tileId: string | null) => boolean;
     swapSlots: (boardId: string, page: number, from: CellKey, to: CellKey, toPage?: number) => boolean;
     setSlotHidden: (boardId: string, page: number, cell: CellKey, hidden: boolean) => boolean;
@@ -274,6 +276,27 @@ function repackBoard(
     if (!board) return;
     const grid = gridOverride ?? board.gridOverride ?? data.gridConfig;
     board.pages = createRepackedPages(board, grid);
+}
+
+function trimTrailingEmptyPages(board: CatalogBoard): void {
+    while (board.pages.length > 1) {
+        const lastPage = board.pages[board.pages.length - 1];
+        if (Object.values(lastPage.cells).some(Boolean)) break;
+        board.pages.pop();
+    }
+}
+
+function stripTileFromBoards(boards: Record<string, CatalogBoard>, tileId: string): void {
+    for (const board of Object.values(boards)) {
+        for (const page of board.pages) {
+            for (const [key, cell] of Object.entries(page.cells)) {
+                if (cell?.tileId === tileId) {
+                    delete page.cells[key as CellKey];
+                }
+            }
+        }
+        trimTrailingEmptyPages(board);
+    }
 }
 
 export function extractBoardData(state: BoardData): BoardData {
@@ -1042,7 +1065,6 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
             createProfile: (name, boardData, svc = profileService) => {
                 if (persistenceBlocked) return get().activeProfileId;
                 if (!canMutateSettings()) return get().activeProfileId;
-                ttsService.stop();
                 const s = get();
                 const ownerUserId = accountProfileOwnerId(s.currentUser);
                 const data = boardData ?? initialData();
@@ -1057,15 +1079,31 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     lastPublishedEditVersion: 0,
                 };
                 const saveRes = svc.saveProfileDocument(doc);
+                if (!saveRes.ok) {
+                    set({
+                        storageStatus: saveRes.status,
+                        storageError: saveRes.errorMessage ?? "Could not save new profile.",
+                    });
+                    return s.activeProfileId;
+                }
                 const profiles = [
                     ...s.profiles,
                     { localProfileId: doc.localProfileId, name: doc.name, cloudProfileId: null, ownerUserId },
                 ];
-                svc.saveActiveIndex({
+                const indexRes = svc.saveActiveIndex({
                     schemaVersion: PROFILE_SCHEMA_VERSION,
                     activeProfileId: doc.localProfileId,
                     profiles,
-                }, accountProfileOwnerId(s.currentUser));
+                }, ownerUserId);
+                if (!indexRes.ok) {
+                    svc.deleteProfileDocument(doc.localProfileId, ownerUserId);
+                    set({
+                        storageStatus: indexRes.status,
+                        storageError: indexRes.errorMessage ?? "Could not save profile list.",
+                    });
+                    return s.activeProfileId;
+                }
+                ttsService.stop();
                 chatSocketService.setActiveContext(null);
                 set({
                     ...buildActivatedProfileState({
@@ -1749,17 +1787,54 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 return ok;
             },
 
+            deleteTile: tileId => {
+                const s = get();
+                const oldTile = s.tiles[tileId];
+                if (!oldTile) return false;
+                const ok = mutateBoard(d => {
+                    delete d.tiles[tileId];
+                    stripTileFromBoards(d.boards, tileId);
+                    if (d.inactiveCatalogLayouts) {
+                        for (const layout of Object.values(d.inactiveCatalogLayouts)) {
+                            if (layout) stripTileFromBoards(layout.boards, tileId);
+                        }
+                    }
+                    if (d.experimentalData?.pinnedTileIds) {
+                        d.experimentalData.pinnedTileIds = d.experimentalData.pinnedTileIds.filter(
+                            id => id !== tileId,
+                        );
+                    }
+                });
+                if (ok && oldTile.mediaId) {
+                    const currentData = extractBoardData(get());
+                    if (!isMediaReferenced(currentData, oldTile.mediaId)) {
+                        void mediaRepository.removeMedia(s.activeProfileId, oldTile.mediaId);
+                    }
+                }
+                return ok;
+            },
+
+            addBoardPage: boardId => {
+                if (!get().boards[boardId]) return false;
+                return mutateBoard(d => {
+                    const b = d.boards[boardId];
+                    if (!b) return;
+                    b.pages.push({ cells: {} });
+                });
+            },
+
             assignSlot: (id, page, key, tileId) =>
                 mutateBoard(d => {
                     const b = d.boards[id];
                     if (!b || (tileId && !d.tiles[tileId])) return;
-                    while (b.pages.length <= page) b.pages.push({ cells: {} });
                     if (tileId) {
+                        while (b.pages.length <= page) b.pages.push({ cells: {} });
                         const prev = b.pages[page].cells[key];
                         b.pages[page].cells[key] =
                             prev?.tileId === tileId && prev.hidden ? { tileId, hidden: true } : { tileId };
-                    } else {
+                    } else if (b.pages[page]) {
                         delete b.pages[page].cells[key];
+                        trimTrailingEmptyPages(b);
                     }
                 }),
 
@@ -1837,8 +1912,9 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                         );
                     }
                     folderIds.forEach(k => delete d.tiles[k]);
+                    const fallbackCategoryId = d.catalogOrder[0] ?? "home";
                     Object.values(d.tiles).forEach(t => {
-                        if (t.categoryId === id) t.categoryId = "home";
+                        if (t.categoryId === id) t.categoryId = fallbackCategoryId;
                     });
                 }),
 

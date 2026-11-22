@@ -69,6 +69,7 @@ export function useBoardGridViewModel(boardId: string, editing: boolean) {
         assign,
         swap,
         hide,
+        addBoardPage,
         reflowBoardToGrid,
         togglePinnedTile,
     } = useBoardSelector(s => ({
@@ -82,6 +83,7 @@ export function useBoardGridViewModel(boardId: string, editing: boolean) {
         assign: s.assignSlot,
         swap: s.swapSlots,
         hide: s.setSlotHidden,
+        addBoardPage: s.addBoardPage,
         reflowBoardToGrid: s.reflowBoardToGrid,
         togglePinnedTile: s.togglePinnedTile,
     }));
@@ -267,10 +269,25 @@ export function useBoardGridViewModel(boardId: string, editing: boolean) {
                 close();
             },
             moveTo: (key: CellKey, pageIndex: number) => {
-                if (moving && (automatic || movingPage === pageIndex)) {
+                if (moving) {
                     swap(boardId, movingPage, moving, key, pageIndex);
                 }
                 setMoving(null);
+            },
+            addPage: () => {
+                if (automatic) return;
+                if (addBoardPage(boardId)) {
+                    const nextPageIndex = pageCount;
+                    setPage(nextPageIndex);
+                    if (typeof requestAnimationFrame === "function") {
+                        requestAnimationFrame(() => {
+                            const el = scrollRef.current;
+                            if (el) {
+                                el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                            }
+                        });
+                    }
+                }
             },
             onScroll: (e: React.UIEvent<HTMLDivElement>) => {
                 const { scrollTop, clientHeight } = e.currentTarget;

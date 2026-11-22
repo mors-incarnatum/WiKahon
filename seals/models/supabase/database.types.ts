@@ -1,8 +1,10 @@
-import type { ColorKey, WordClass } from "@/lib/board";
+import type { ColorKey, ColorSystemId, LanguageTag, WordClass } from "@/lib/board";
 
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 export type ProfileMemberRole = "editor" | "viewer";
 export type AppUserRole = "PARENT" | "CAREGIVER" | "CHILD";
+export type LayoutMode = "manual" | "automatic";
+export type ChatSenderRole = "guardian" | "child";
 type Table<Row, Required extends keyof Row, Relations extends Relationship[] = []> = {
     Row: Row;
     Insert: Pick<Row, Required> & Partial<Omit<Row, Required>>;
@@ -39,6 +41,8 @@ export type BoardRow = {
     icon_name: string | null;
     is_built_in: boolean;
     grid_override: Json | null;
+    layout_mode_override: LayoutMode | null;
+    catalog_system: ColorSystemId | null;
     pages: Json;
 };
 export type TileRow = {
@@ -49,7 +53,7 @@ export type TileRow = {
     spoken_text: string | null;
     icon_name: string | null;
     media_id: string | null;
-    language: string | null;
+    language: LanguageTag;
     is_quick_phrase: boolean;
     category_id: string;
     target_board_id: string | null;
@@ -57,23 +61,12 @@ export type TileRow = {
     word_class: WordClass | null;
     is_custom: boolean;
 };
-export type WordRow = {
-    profile_id: string;
-    id: string;
-    label: string;
-    spoken_text: string | null;
-    icon_name: string | null;
-    media_id: string | null;
-    language: string | null;
-    category_id: string;
-    color_key: ColorKey | null;
-    word_class: WordClass | null;
-    is_custom: boolean;
-    is_quick_phrase: boolean;
-};
 export type ProfileSettingsRow = {
     profile_id: string;
     catalog_order: string[];
+    color_system: ColorSystemId;
+    layout_mode: LayoutMode;
+    inactive_catalog_layouts: Json;
     grid_config: Json;
     tile_appearance: Json;
     speech_config: Json;
@@ -85,18 +78,19 @@ export type UserAccountRow = {
     username: string;
     display_name: string;
     role: AppUserRole;
+    guardian_id: string | null;
 };
 export type ProfileChatMessageRow = {
     id: string;
     profile_id: string;
     sender_user_id: string;
-    sender_role: "guardian" | "child";
+    sender_role: ChatSenderRole;
     sender_name: string;
     text: string;
     created_at: string;
 };
 
-/** Schema contract for 20261117000100_board_models.sql + 20261117000200_w07_revisions_media_and_flags.sql + 20261118000100_words_schema.sql + 20261122000100_auth_roles_and_publish_fix.sql + 20261122000200_guardian_signup_role.sql + 20261122000300_security_hardening.sql (normalized to omit Timestamps) */
+/** Schema contract for 20261117000100_board_models.sql through 20261123000400_schema_audit_optimizations.sql (normalized to omit Timestamps) */
 export type Database = {
     public: {
         Tables: {
@@ -137,20 +131,6 @@ export type Database = {
                 "profile_id",
                 [ProfileRelation<"profile_settings_profile_id_fkey", true>]
             >;
-            words: Table<
-                WordRow,
-                "profile_id" | "id" | "label" | "category_id",
-                [
-                    ProfileRelation<"words_profile_id_fkey">,
-                    {
-                        foreignKeyName: "words_profile_id_category_id_fkey";
-                        columns: ["profile_id", "category_id"];
-                        isOneToOne: false;
-                        referencedRelation: "boards";
-                        referencedColumns: ["profile_id", "id"];
-                    },
-                ]
-            >;
             user_accounts: Table<UserAccountRow, "user_id" | "username" | "display_name">;
             profile_chat_messages: Table<
                 ProfileChatMessageRow,
@@ -168,6 +148,7 @@ export type Database = {
                     p_tiles: Json;
                     p_words?: Json;
                     p_settings: Json;
+                    p_profile_name?: string | null;
                 };
                 Returns: number;
             };
@@ -192,6 +173,10 @@ export type Database = {
             tile_kind: "word" | "folder";
             board_color: ColorKey;
             word_class: WordClass;
+            language_tag: LanguageTag;
+            chat_sender_role: ChatSenderRole;
+            layout_mode: LayoutMode;
+            color_system: ColorSystemId;
         };
         CompositeTypes: { [_ in never]: never };
     };

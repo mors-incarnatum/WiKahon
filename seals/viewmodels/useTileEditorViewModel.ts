@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useBoardStore } from "@/store/BoardProvider";
 import {
     uid,
@@ -30,10 +30,13 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
     const colorMode = useBoardStore(s => s.tileAppearance.colorMode);
     const activeProfileId = useBoardStore(s => s.activeProfileId);
     const upsert = useBoardStore(s => s.upsertTile);
+    const deleteTile = useBoardStore(s => s.deleteTile);
     const assign = useBoardStore(s => s.assignSlot);
     const add = useBoardStore(s => s.addWordsToCatalog);
     const createCatalog = useBoardStore(s => s.createCatalog);
     const sentence = useSentenceContext();
+
+    const defaultCategoryId = target.boardId === "home" ? (order[0] ?? "home") : target.boardId;
 
     const [tab, setTab] = useState(
         target.tile?.kind === "folder" ? "folder" : target.tile ? "custom" : "existing",
@@ -41,23 +44,32 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
     const [query, setQuery] = useState("");
     const [filter, setFilter] = useState("all");
     const [picked, setPicked] = useState<string[]>([]);
-    const [preview, setPreview] = useState<Tile>(
-        target.tile ?? {
-            id: `custom-${uid()}`,
-            kind: "word",
-            label: "",
-            spokenText: "",
-            language: "fil",
-            categoryId: target.boardId === "home" ? order[0] : target.boardId,
-            iconName: null,
-            mediaId: null,
-            isCustom: true,
-        },
+    const [selectedExisting, setSelectedExisting] = useState<Tile | null>(
+        target.tile?.kind === "word" ? target.tile : null,
+    );
+    const [customDraft, setCustomDraft] = useState<Tile>(() =>
+        target.tile?.kind === "word"
+            ? { ...target.tile }
+            : {
+                  id: `custom-${uid()}`,
+                  kind: "word",
+                  label: "",
+                  spokenText: "",
+                  language: "fil",
+                  categoryId: defaultCategoryId,
+                  iconName: null,
+                  mediaId: null,
+                  isCustom: true,
+              },
+    );
+    const [selectedFolder, setSelectedFolder] = useState<Tile | null>(
+        target.tile?.kind === "folder" ? { ...target.tile } : null,
     );
     const [folderName, setFolderName] = useState("");
     const [cropSquare, setCropSquare] = useState(true);
     const [photoError, setPhotoError] = useState("");
     const [uploadingPhoto, setUploadingPhoto] = useState(false);
+    const [confirmDeleteWord, setConfirmDeleteWord] = useState(false);
 
     const uncommittedMediaIds = useRef<Set<string>>(new Set());
     const profileIdRef = useRef(activeProfileId);
@@ -76,7 +88,7 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
         };
     }, []);
 
-    const patch = (value: Partial<Tile>) => setPreview(p => ({ ...p, ...value }));
+    const patch = (value: Partial<Tile>) => setCustomDraft(p => ({ ...p, ...value }));
 
     const removeUncommittedMedia = (mediaId: string | null | undefined) => {
         if (mediaId && uncommittedMediaIds.current.has(mediaId)) {
@@ -107,6 +119,33 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
                 boards[filter]?.pages.some(p => Object.values(p.cells).some(c => c?.tileId === t.id))),
     );
 
+    const alreadyOnBoardIds = useMemo(() => {
+        const ids = new Set<string>();
+        const board = boards[target.boardId];
+        if (!board) return ids;
+        for (const page of board.pages) {
+            for (const cell of Object.values(page.cells)) {
+                if (cell?.tileId) ids.add(cell.tileId);
+            }
+        }
+        return ids;
+    }, [boards, target.boardId]);
+
+    const isEditingWord = Boolean(target.tile?.kind === "word" && tiles[target.tile.id]);
+    const usageCount = useMemo(() => {
+        if (!isEditingWord || !target.tile) return 0;
+        const targetId = target.tile.id;
+        let count = 0;
+        for (const board of Object.values(boards)) {
+            for (const page of board.pages) {
+                for (const cell of Object.values(page.cells)) {
+                    if (cell?.tileId === targetId) count += 1;
+                }
+            }
+        }
+        return count;
+    }, [boards, isEditingWord, target.tile]);
+
     const uploadPhoto = async (file: File | null | undefined) => {
         if (!file) return;
         setPhotoError("");
@@ -127,7 +166,7 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
                 setPhotoError(saved.error ?? "Failed to save photo.");
                 return;
             }
-            removeUncommittedMedia(preview.mediaId);
+            removeUncommittedMedia(customDraft.mediaId);
             uncommittedMediaIds.current.add(newMediaId);
             patch({ mediaId: newMediaId });
         } finally {
@@ -137,9 +176,38 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
 
     const removePhoto = () => {
         setPhotoError("");
-        removeUncommittedMedia(preview.mediaId);
+        removeUncommittedMedia(customDraft.mediaId);
         patch({ mediaId: null });
     };
+
+    const preview: Tile =
+        tab === "custom"
+            ? customDraft
+            : tab === "folder"
+              ? (selectedFolder ?? {
+                    id: "",
+                    kind: "folder",
+                    label: "",
+                    categoryId: defaultCategoryId,
+                    iconName: null,
+                })
+              : (selectedExisting ?? {
+                    id: "",
+                    kind: "word",
+                    label: "",
+                    spokenText: "",
+                    language: "fil",
+                    categoryId: defaultCategoryId,
+                    iconName: null,
+                    mediaId: null,
+                });
+
+    const canSave =
+        tab === "custom"
+            ? customDraft.label.trim().length > 0
+            : tab === "existing"
+              ? Boolean(selectedExisting && selectedExisting.label.trim().length > 0)
+              : Boolean(selectedFolder?.kind === "folder" && selectedFolder.targetBoardId);
 
     return {
         state: {
@@ -148,15 +216,22 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
             filter,
             picked,
             preview,
+            customDraft,
+            selectedExisting,
+            selectedFolder,
             previewColor: resolveBoardTileColor(preview, boards, colorMode, colorSystem, target.boardId),
             canCreateCatalog: colorSystem === "custom",
             folderName,
             words,
+            alreadyOnBoardIds,
             catalogs: order.map(id => boards[id]).filter(Boolean),
-            canSave: preview.label.trim().length > 0,
+            canSave,
             cropSquare,
             photoError,
             uploadingPhoto,
+            isEditingWord,
+            usageCount,
+            confirmDeleteWord,
         },
         actions: {
             setTab,
@@ -164,6 +239,7 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
             setFilter,
             setFolderName,
             setCropSquare,
+            setConfirmDeleteWord,
             patch,
             setColor: (colorKey: ColorKey) => patch({ colorKey }),
             setWordClass: (wordClass: WordClass) => patch({ wordClass }),
@@ -171,7 +247,8 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
             uploadPhoto,
             removePhoto,
             chooseWord: (tile: Tile) => {
-                setPreview(tile);
+                if (target.multi && alreadyOnBoardIds.has(tile.id)) return;
+                setSelectedExisting(tile);
                 if (target.multi) {
                     setPicked(ids =>
                         ids.includes(tile.id) ? ids.filter(id => id !== tile.id) : [...ids, tile.id],
@@ -182,21 +259,40 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
                 if (target.multi) {
                     add(target.boardId, picked);
                     target.onClose();
-                } else if (preview.label) {
-                    saveTile(preview);
+                } else if (selectedExisting && selectedExisting.label.trim()) {
+                    saveTile(selectedExisting);
                 }
             },
             saveCustom: () => {
-                if (preview.label.trim()) {
-                    const { targetBoardId: _ignoredTarget, ...rest } = preview;
-                    void _ignoredTarget;
-                    saveTile({ ...rest, label: preview.label.trim(), kind: "word" });
-                }
+                const trimmedLabel = customDraft.label.trim();
+                if (!trimmedLabel) return;
+                const { targetBoardId: _ignoredTarget, ...rest } = customDraft;
+                void _ignoredTarget;
+                saveTile({ ...rest, label: trimmedLabel, kind: "word" });
+            },
+            saveCustomAsCopy: () => {
+                const trimmedLabel = customDraft.label.trim();
+                if (!trimmedLabel) return;
+                const { targetBoardId: _ignoredTarget, ...rest } = customDraft;
+                void _ignoredTarget;
+                saveTile({
+                    ...rest,
+                    id: `custom-${uid()}`,
+                    label: trimmedLabel,
+                    kind: "word",
+                    isCustom: true,
+                });
+            },
+            deleteWord: () => {
+                if (!isEditingWord || !target.tile) return;
+                deleteTile(target.tile.id);
+                target.onClose();
             },
             chooseFolder: (id: string) => {
                 const b = boards[id];
-                setPreview({
-                    id: `folder-${uid()}`,
+                if (!b) return;
+                setSelectedFolder({
+                    id: selectedFolder?.id || (target.tile?.kind === "folder" ? target.tile.id : `folder-${uid()}`),
                     kind: "folder",
                     label: b.name,
                     categoryId: id,
@@ -205,18 +301,18 @@ export function useTileEditorViewModel(target: TileEditorTarget) {
                 });
             },
             saveFolder: () => {
-                if (preview.kind === "folder") saveTile(preview);
+                if (selectedFolder?.kind === "folder") saveTile(selectedFolder);
             },
             createFolder: () => {
                 if (colorSystem !== "custom" || !folderName.trim()) return;
                 const id = createCatalog({
                     name: folderName,
-                    colorKey: preview.colorKey ?? "teal",
+                    colorKey: customDraft.colorKey ?? "teal",
                     iconName: null,
                 });
                 if (!id) return;
-                setPreview({
-                    id: `folder-${uid()}`,
+                setSelectedFolder({
+                    id: selectedFolder?.id || (target.tile?.kind === "folder" ? target.tile.id : `folder-${uid()}`),
                     kind: "folder",
                     label: folderName.trim(),
                     categoryId: id,

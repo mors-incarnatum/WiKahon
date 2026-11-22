@@ -1,5 +1,21 @@
 import { z } from "zod";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const optionalBoardProfileIdSchema = z
+    .string()
+    .trim()
+    .default("")
+    .refine(val => val === "" || UUID_RE.test(val), "Select a valid cloud board profile or leave unassigned.");
+
+const childUserIdSchema = z.string().trim().regex(UUID_RE, "Invalid child account identifier.");
+
+const displayNameSchema = z
+    .string()
+    .trim()
+    .min(2, "Name must be at least 2 characters long.")
+    .max(60, "Name must be at most 60 characters.");
+
 export const LoginFormSchema = z.object({
     identifier: z
         .string()
@@ -12,7 +28,7 @@ export const LoginFormSchema = z.object({
         ),
     password: z
         .string()
-        .min(4, "Password or PIN must be at least 4 characters.")
+        .min(4, "Password must be at least 4 characters.")
         .max(128, "Password must be at most 128 characters."),
 });
 
@@ -78,11 +94,7 @@ export const SignupFormSchema = z
 
 export const ChildProvisionSchema = z
     .object({
-        name: z
-            .string()
-            .trim()
-            .min(2, "Name must be at least 2 characters long.")
-            .max(60, "Name must be at most 60 characters."),
+        name: displayNameSchema,
         username: z
             .string()
             .trim()
@@ -92,10 +104,6 @@ export const ChildProvisionSchema = z
             .regex(
                 /^[a-z0-9._-]+$/,
                 "Username may only contain letters, numbers, dots, underscores, or hyphens.",
-            )
-            .refine(
-                val => val !== "guardian" && val !== "child",
-                "Usernames 'guardian' and 'child' are reserved.",
             ),
         email: z
             .string()
@@ -111,13 +119,7 @@ export const ChildProvisionSchema = z
             .min(6, "Password must be at least 6 characters.")
             .max(128, "Password must be at most 128 characters."),
         confirmPassword: z.string(),
-        profileId: z
-            .string()
-            .trim()
-            .regex(
-                /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-                "Select a published cloud board profile.",
-            ),
+        profileId: optionalBoardProfileIdSchema,
     })
     .superRefine((data, ctx) => {
         if (data.password !== data.confirmPassword) {
@@ -129,10 +131,36 @@ export const ChildProvisionSchema = z
         }
     });
 
+export const ChildUpdateSchema = z.object({
+    childUserId: childUserIdSchema,
+    name: displayNameSchema,
+    profileId: optionalBoardProfileIdSchema,
+});
+
+export const ChildPasswordResetSchema = z
+    .object({
+        childUserId: childUserIdSchema,
+        password: z
+            .string()
+            .min(6, "Password must be at least 6 characters.")
+            .max(128, "Password must be at most 128 characters."),
+        confirmPassword: z.string(),
+    })
+    .superRefine((data, ctx) => {
+        if (data.password !== data.confirmPassword) {
+            ctx.addIssue({
+                code: "custom",
+                path: ["confirmPassword"],
+                message: "Passwords do not match.",
+            });
+        }
+    });
 
 export type LoginFormInput = z.infer<typeof LoginFormSchema>;
 export type SignupFormInput = z.infer<typeof SignupFormSchema>;
 export type ChildProvisionInput = z.infer<typeof ChildProvisionSchema>;
+export type ChildUpdateInput = z.infer<typeof ChildUpdateSchema>;
+export type ChildPasswordResetInput = z.infer<typeof ChildPasswordResetSchema>;
 export type ValidationFieldErrors = Record<string, string[]>;
 
 export type ValidationResult<T> =
@@ -170,4 +198,14 @@ export function validateSignupInput(input: unknown): ValidationResult<SignupForm
 /** Validates guardian-provisioned child account fields with the Zod ChildProvisionSchema. */
 export function validateChildProvisionInput(input: unknown): ValidationResult<ChildProvisionInput> {
     return collectValidationErrors(ChildProvisionSchema.safeParse(input));
+}
+
+/** Validates guardian edits to a provisioned child account with the Zod ChildUpdateSchema. */
+export function validateChildUpdateInput(input: unknown): ValidationResult<ChildUpdateInput> {
+    return collectValidationErrors(ChildUpdateSchema.safeParse(input));
+}
+
+/** Validates guardian-initiated child password reset fields with the Zod ChildPasswordResetSchema. */
+export function validateChildPasswordResetInput(input: unknown): ValidationResult<ChildPasswordResetInput> {
+    return collectValidationErrors(ChildPasswordResetSchema.safeParse(input));
 }

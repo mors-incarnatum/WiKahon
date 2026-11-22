@@ -1,5 +1,5 @@
-import { uid, type CatalogBoard, type Tile } from "@/lib/board";
-import { initialData } from "@/lib/boardDefaults";
+import { COLOR_SYSTEMS, uid, type CatalogBoard, type ColorSystemId, type Tile } from "@/lib/board";
+import { initialData, readColorSystem, sanitizeInactiveCatalogLayouts } from "@/lib/boardDefaults";
 import type { BoardData } from "@/models/boardData";
 import { PROFILE_SCHEMA_VERSION, type LocalProfileDocument } from "@/models/profile";
 import { getSupabaseBrowserClient, type BoardSupabaseClient } from "@/models/supabase/client";
@@ -9,16 +9,27 @@ import {
     boardToRow,
     settingsToRow,
     tileToRow,
-    tileToWord,
-    wordToRow,
-    wordToTile,
+    type BoardEntry,
+    type CloudSettings,
+    type CompactInactiveCatalogLayouts,
 } from "@/models/supabase/mappers";
-import type { Word } from "@/models/word";
 import { discardPreparedMedia, mediaRepository, type IMediaRepository } from "@/services/storage/mediaRepository";
 
 export interface CloudUser {
     id: string;
     email: string | null;
+}
+
+const MEDIA_CONCURRENCY = 4;
+
+async function runInChunks<T>(
+    items: readonly T[],
+    concurrency: number,
+    task: (item: T) => Promise<void>,
+): Promise<void> {
+    for (let i = 0; i < items.length; i += concurrency) {
+        await Promise.all(items.slice(i, i + concurrency).map(task));
+    }
 }
 
 function isMissingPublishRpcError(error: { code?: string; message?: string }): boolean {
@@ -99,47 +110,57 @@ export class CloudSyncService {
             for (const tile of Object.values(params.boardData.tiles)) {
                 if (tile.mediaId) mediaIds.add(tile.mediaId);
             }
-            for (const mediaId of mediaIds) {
+            const existingRemoteIds = new Set(await repo.listProfileMedia(profileId).catch(() => []));
+            const missingMediaIds = [...mediaIds].filter(id => !existingRemoteIds.has(id));
+            await runInChunks(missingMediaIds, MEDIA_CONCURRENCY, async mediaId => {
                 const record = await this.mediaRepo.loadMedia(params.localProfileId, mediaId);
                 if (!record) throw new Error(`Cannot publish: missing photo ${mediaId}.`);
                 await repo.uploadProfileMedia(profileId, mediaId, record.blob, record.mimeType);
-            }
+            });
 
-            // 2. Normalize boards, words (public.words), and folder tiles (public.tiles).
-            // Include inactive catalogs so shared vocabulary and folder targets retain their database references.
-            const inactiveBoards = Object.values(params.boardData.inactiveCatalogLayouts ?? {})
-                .flatMap(layout => Object.values(layout.boards).filter(board => board.id !== "home"));
-            const boards = [...new Map(
-                [...inactiveBoards, ...Object.values(params.boardData.boards)].map(board => [board.id, board]),
-            ).values()];
-            const boardIds = new Set(boards.map(b => b.id));
-            const fallbackCategoryId = boardIds.has("home") ? "home" : (boards[0]?.id ?? "home");
-            const words: Word[] = [];
-            const folderTiles: Tile[] = [];
-            for (const tile of Object.values(params.boardData.tiles)) {
-                const normalizedCategoryId = boardIds.has(tile.categoryId) ? tile.categoryId : fallbackCategoryId;
-                if (tile.kind === "word") {
-                    words.push(tileToWord({ ...tile, categoryId: normalizedCategoryId }));
-                } else if (tile.kind === "folder" && tile.targetBoardId && boardIds.has(tile.targetBoardId)) {
-                    folderTiles.push({ ...tile, categoryId: normalizedCategoryId });
+            // 2. Normalize active/inactive boards and tiles (both words and folders live in public.tiles).
+            const activeBoards = Object.values(params.boardData.boards);
+            const boardIds = new Set(activeBoards.map(b => b.id));
+            const boardEntries: BoardEntry[] = activeBoards.map(board => ({
+                board,
+                catalogSystem: null,
+            }));
+            const compactInactiveLayouts: CompactInactiveCatalogLayouts = {};
+            for (const [system, layout] of Object.entries(params.boardData.inactiveCatalogLayouts ?? {}) as [
+                ColorSystemId,
+                NonNullable<BoardData["inactiveCatalogLayouts"]>[ColorSystemId],
+            ][]) {
+                if (!layout || !Object.hasOwn(COLOR_SYSTEMS, system)) continue;
+                if (layout.boards.home) {
+                    compactInactiveLayouts[system] = {
+                        home: layout.boards.home,
+                        catalogOrder: layout.catalogOrder,
+                    };
+                }
+                for (const board of Object.values(layout.boards)) {
+                    if (board.id === "home" || boardIds.has(board.id)) continue;
+                    boardIds.add(board.id);
+                    boardEntries.push({ board, catalogSystem: system });
                 }
             }
 
-            // Keep the two UI palette additions in settings JSON alongside existing database enum values.
-            const colorOverrides = (entries: { id: string; colorKey?: Tile["colorKey"] }[]) =>
-                Object.fromEntries(entries.flatMap(({ id, colorKey }) =>
-                    colorKey === "yellow" || colorKey === "white" ? [[id, colorKey] as const] : [],
-                ));
-            const cloudSettings = {
-                colorSystem: params.boardData.colorSystem,
-                inactiveCatalogLayouts: params.boardData.inactiveCatalogLayouts,
-                colorOverrides: {
-                    boards: colorOverrides(boards),
-                    tiles: colorOverrides([...words, ...folderTiles]),
-                },
+            const fallbackCategoryId = boardIds.has("home") ? "home" : (boardEntries[0]?.board.id ?? "home");
+            const tiles: Tile[] = [];
+            for (const tile of Object.values(params.boardData.tiles)) {
+                const normalizedCategoryId = boardIds.has(tile.categoryId) ? tile.categoryId : fallbackCategoryId;
+                if (tile.kind === "word") {
+                    tiles.push({ ...tile, categoryId: normalizedCategoryId });
+                } else if (tile.kind === "folder" && tile.targetBoardId && boardIds.has(tile.targetBoardId)) {
+                    tiles.push({ ...tile, categoryId: normalizedCategoryId });
+                }
+            }
+
+            const cloudSettings: CloudSettings = {
+                colorSystem: readColorSystem(params.boardData.colorSystem),
+                inactiveCatalogLayouts: compactInactiveLayouts,
                 catalogOrder: params.boardData.catalogOrder,
                 gridConfig: params.boardData.gridConfig,
-                layoutMode: params.boardData.layoutMode,
+                layoutMode: params.boardData.layoutMode ?? "manual",
                 tileAppearance: params.boardData.tileAppearance,
                 speechConfig: params.boardData.speechConfig,
                 accessConfig: {
@@ -152,14 +173,16 @@ export class CloudSyncService {
             };
             const settingsRow = settingsToRow(profileId, cloudSettings);
 
-            // 3. Require atomic server-side snapshot publication.
+            // 3. Require atomic server-side snapshot publication (including owner-only rename).
             const { data: rpcRevision, error: rpcError } = await client.rpc("publish_profile_snapshot", {
                 p_profile_id: profileId,
                 p_expected_revision: expectedRev ?? null,
-                p_boards: boards.map(b => boardToRow(profileId, b)) as unknown as Json,
-                p_tiles: folderTiles.map(t => tileToRow(profileId, t)) as unknown as Json,
-                p_words: words.map(w => wordToRow(profileId, w)) as unknown as Json,
+                p_boards: boardEntries.map(({ board, catalogSystem }) =>
+                    boardToRow(profileId, board, catalogSystem),
+                ) as unknown as Json,
+                p_tiles: tiles.map(t => tileToRow(profileId, t)) as unknown as Json,
                 p_settings: settingsRow as unknown as Json,
+                p_profile_name: params.profileName,
             });
 
             if (rpcError) {
@@ -176,25 +199,9 @@ export class CloudSyncService {
             const nextRevision = rpcRevision;
             snapshotCommitted = true;
 
-            if (params.cloudProfileId) {
-                const profilesTable = client.from("profiles");
-                if (profilesTable && typeof profilesTable.select === "function" && typeof profilesTable.update === "function") {
-                    const { data: existingProfile } = await profilesTable
-                        .select("name")
-                        .eq("id", profileId)
-                        .maybeSingle();
-                    if (!existingProfile || existingProfile.name !== params.profileName) {
-                        const { error: renameError } = await profilesTable
-                            .update({ name: params.profileName })
-                            .eq("id", profileId);
-                        if (renameError) throw new Error(renameError.message);
-                    }
-                } else if (profilesTable && typeof profilesTable.update === "function") {
-                    const { error: renameError } = await profilesTable
-                        .update({ name: params.profileName })
-                        .eq("id", profileId);
-                    if (renameError) throw new Error(renameError.message);
-                }
+            const staleIds = [...existingRemoteIds].filter(id => !mediaIds.has(id));
+            if (staleIds.length > 0) {
+                await repo.removeProfileMedia(profileId, staleIds).catch(() => undefined);
             }
 
             return { ok: true, cloudProfileId: profileId, revision: nextRevision };
@@ -238,46 +245,73 @@ export class CloudSyncService {
         const repo = this.makeRepo(client);
         const localProfileId = targetLocalProfileId ?? `profile-${uid()}`;
         const newlyAddedMediaIds: string[] = [];
+        let aborted = false;
         try {
-            const [boards, folderTiles, words, settings] = await Promise.all([
+            const [boardEntries, tiles, settings] = await Promise.all([
                 repo.listBoards(cloudProfile.id),
                 repo.listTiles(cloudProfile.id),
-                repo.listWords(cloudProfile.id),
                 repo.getSettings(cloudProfile.id),
             ]);
 
             const defaults = initialData();
             const boardMap: Record<string, CatalogBoard> = {};
-            const inactiveIds = new Set(Object.values(settings?.inactiveCatalogLayouts ?? {})
-                .flatMap(layout => Object.keys(layout.boards).filter(id => id !== "home")));
-            const activeIds = new Set(settings?.catalogOrder);
-            for (const board of boards) {
-                if (inactiveIds.has(board.id) && !activeIds.has(board.id)) continue;
-                const override = settings?.colorOverrides?.boards[board.id];
-                boardMap[board.id] = override ? { ...board, colorKey: override } : board;
+            const inactiveBoardsBySystem: Partial<Record<ColorSystemId, Record<string, CatalogBoard>>> = {};
+            for (const { board, catalogSystem } of boardEntries) {
+                if (catalogSystem === null) {
+                    boardMap[board.id] = board;
+                } else {
+                    const bucket = (inactiveBoardsBySystem[catalogSystem] ??= {});
+                    bucket[board.id] = board;
+                }
             }
+            const rawInactiveLayouts: Record<string, { boards: Record<string, CatalogBoard>; catalogOrder: string[] }> = {};
+            for (const [system, compact] of Object.entries(settings?.inactiveCatalogLayouts ?? {}) as [
+                ColorSystemId,
+                NonNullable<CompactInactiveCatalogLayouts[ColorSystemId]>,
+            ][]) {
+                if (!compact) continue;
+                const systemBoards: Record<string, CatalogBoard> = {
+                    ...(inactiveBoardsBySystem[system] ?? {}),
+                    home: compact.home,
+                };
+                for (const id of compact.catalogOrder) {
+                    if (!Object.hasOwn(systemBoards, id) && Object.hasOwn(boardMap, id)) {
+                        systemBoards[id] = boardMap[id];
+                    }
+                }
+                rawInactiveLayouts[system] = {
+                    boards: systemBoards,
+                    catalogOrder: compact.catalogOrder,
+                };
+            }
+            const inactiveCatalogLayouts = sanitizeInactiveCatalogLayouts(rawInactiveLayouts);
+            const hasInactiveLayouts = Boolean(inactiveCatalogLayouts && Object.keys(inactiveCatalogLayouts).length > 0);
+
             const tileMap: Record<string, Tile> = {};
-            for (const tile of [...words.map(wordToTile), ...folderTiles]) {
-                const override = settings?.colorOverrides?.tiles[tile.id];
-                tileMap[tile.id] = override ? { ...tile, colorKey: override } : tile;
+            for (const tile of tiles) {
+                tileMap[tile.id] = tile;
             }
 
-            // Download referenced media into local IndexedDB under the target localProfileId.
-            const mediaIds = new Set(Object.values(tileMap).flatMap(tile => (tile.mediaId ? [tile.mediaId] : [])));
-            for (const mediaId of mediaIds) {
-                const alreadyExists = targetLocalProfileId
-                    ? (await this.mediaRepo.loadMedia(localProfileId, mediaId)) !== null
-                    : false;
+            // Download missing referenced media into local IndexedDB under the target localProfileId.
+            const mediaIds = [...new Set(Object.values(tileMap).flatMap(tile => (tile.mediaId ? [tile.mediaId] : [])))];
+            await runInChunks(mediaIds, MEDIA_CONCURRENCY, async mediaId => {
+                if (aborted) return;
+                if (targetLocalProfileId && (await this.mediaRepo.loadMedia(localProfileId, mediaId)) !== null) {
+                    return;
+                }
                 const blob = await repo.downloadProfileMedia(cloudProfile.id, mediaId);
+                if (aborted) return;
                 if (!blob) throw new Error(`Could not download photo ${mediaId}.`);
                 const saved = await this.mediaRepo.saveMedia(localProfileId, mediaId, blob, {
                     mimeType: blob.type || "image/webp", width: 0, height: 0,
                 });
                 if (!saved.ok) throw new Error(`Could not save photo ${mediaId}: ${saved.error ?? "storage error"}`);
-                if (!alreadyExists) {
-                    newlyAddedMediaIds.push(mediaId);
+                if (aborted) {
+                    await this.mediaRepo.removeMedia(localProfileId, mediaId);
+                    return;
                 }
-            }
+                newlyAddedMediaIds.push(mediaId);
+            });
 
             const boardData: BoardData = {
                 ...defaults,
@@ -287,7 +321,7 @@ export class CloudSyncService {
                     ? {
                           catalogOrder: settings.catalogOrder,
                           colorSystem: settings.colorSystem,
-                          inactiveCatalogLayouts: settings.inactiveCatalogLayouts,
+                          ...(hasInactiveLayouts ? { inactiveCatalogLayouts } : {}),
                           gridConfig: settings.gridConfig,
                           layoutMode: settings.layoutMode ?? defaults.layoutMode,
                           tileAppearance: settings.tileAppearance,
@@ -319,6 +353,7 @@ export class CloudSyncService {
                 },
             };
         } catch (error) {
+            aborted = true;
             if (!targetLocalProfileId) {
                 await discardPreparedMedia(localProfileId, this.mediaRepo);
             } else {
@@ -327,6 +362,29 @@ export class CloudSyncService {
             return {
                 ok: false,
                 error: error instanceof Error ? error.message : "Could not download cloud profile.",
+            };
+        }
+    }
+
+    async deleteCloudProfile(profileId: string, userId: string): Promise<{ ok: boolean; error?: string }> {
+        const client = this.getClient();
+        if (!client) return { ok: false, error: "Supabase is not configured." };
+        try {
+            const user = await this.getCurrentUser();
+            if (user?.id !== userId) {
+                return { ok: false, error: "The signed-in account changed." };
+            }
+            const repo = this.makeRepo(client);
+            const mediaIds = await repo.listProfileMedia(profileId).catch(() => []);
+            if (mediaIds.length > 0) {
+                await repo.removeProfileMedia(profileId, mediaIds).catch(() => undefined);
+            }
+            await repo.deleteProfile(profileId);
+            return { ok: true };
+        } catch (error) {
+            return {
+                ok: false,
+                error: error instanceof Error ? error.message : "Could not delete cloud profile.",
             };
         }
     }

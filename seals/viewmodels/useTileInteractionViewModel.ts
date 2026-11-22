@@ -26,6 +26,7 @@ export function useTileInteractionViewModel(
     const cancel = () => {
         if (timer.current) clearTimeout(timer.current);
         timer.current = null;
+        start.current = null;
     };
 
     useEffect(() => {

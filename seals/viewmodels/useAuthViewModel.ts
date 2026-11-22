@@ -2,7 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { loginServerAction, signupServerAction } from "@/app/actions/auth";
+import {
+    loginServerAction,
+    resendConfirmationEmailServerAction,
+    signupServerAction,
+} from "@/app/actions/auth";
 import { isGuardianRole } from "@/models/auth";
 import {
     validateLoginInput,
@@ -53,6 +57,7 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
     // Login & shared password fields
     const [identifier, setIdentifierState] = useState("");
     const [password, setPasswordState] = useState("");
+    const [showPassword, setShowPassword] = useState(false);
 
     // Signup fields
     const [name, setNameState] = useState("");
@@ -60,9 +65,22 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
     const [email, setEmailState] = useState("");
     const [role, setRoleState] = useState<GuardianSignupRole>("CAREGIVER");
     const [confirmPassword, setConfirmPasswordState] = useState("");
+    const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+    // Offline child profile selection
+    const [selectedOfflineProfileIdState, setSelectedOfflineProfileIdState] = useState(
+        () => offlineDesignatedProfiles[0]?.localProfileId ?? "",
+    );
+    const selectedOfflineProfileId = offlineDesignatedProfiles.some(
+        profile => profile.localProfileId === selectedOfflineProfileIdState,
+    )
+        ? selectedOfflineProfileIdState
+        : (offlineDesignatedProfiles[0]?.localProfileId ?? "");
 
     const [error, setError] = useState("");
     const [infoMessage, setInfoMessage] = useState("");
+    const [pendingConfirmationEmail, setPendingConfirmationEmail] = useState("");
+    const [isResending, setIsResending] = useState(false);
     const [fieldErrors, setFieldErrors] = useState<ValidationFieldErrors>({});
     const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -84,9 +102,12 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
         setModeState(nextMode);
         setError("");
         setInfoMessage("");
+        setPendingConfirmationEmail("");
         setFieldErrors({});
         setPasswordState("");
         setConfirmPasswordState("");
+        setShowPassword(false);
+        setShowConfirmPassword(false);
         if (nextMode === "signup" && pathname !== "/register") {
             router.push("/register");
         } else if (nextMode === "login" && pathname !== "/login") {
@@ -98,6 +119,7 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
         if (isSubmitting) return;
         setError("");
         setInfoMessage("");
+        setPendingConfirmationEmail("");
         setFieldErrors({});
 
         const validation = validateLoginInput({ identifier, password });
@@ -119,6 +141,7 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
             applyAuthSession(res.session);
             authService.broadcastSessionRefresh();
             setPasswordState("");
+            setShowPassword(false);
             router.replace("/board");
         } catch (err) {
             setError(
@@ -135,6 +158,7 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
         if (isSubmitting) return;
         setError("");
         setInfoMessage("");
+        setPendingConfirmationEmail("");
         setFieldErrors({});
 
         const validation = validateSignupInput({
@@ -169,11 +193,14 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
                 return;
             }
             if (res.requiresEmailConfirmation) {
+                setPendingConfirmationEmail(validation.data.email);
                 setInfoMessage(
                     res.message ?? "Check your email to confirm your account before signing in.",
                 );
                 setPasswordState("");
                 setConfirmPasswordState("");
+                setShowPassword(false);
+                setShowConfirmPassword(false);
                 return;
             }
             if (!res.session) {
@@ -185,6 +212,8 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
             authService.broadcastSessionRefresh();
             setPasswordState("");
             setConfirmPasswordState("");
+            setShowPassword(false);
+            setShowConfirmPassword(false);
             router.replace("/board");
         } catch (err) {
             setError(
@@ -197,11 +226,37 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
         }
     };
 
+    const resendConfirmation = async () => {
+        if (isResending || !pendingConfirmationEmail) return;
+        setError("");
+        setIsResending(true);
+        try {
+            const res = await resendConfirmationEmailServerAction(pendingConfirmationEmail);
+            if (!res.ok) {
+                setError(res.error ?? "Unable to resend confirmation email right now.");
+                return;
+            }
+            setInfoMessage(
+                res.message ??
+                    "If an unconfirmed account exists for that email, a new confirmation link has been sent.",
+            );
+        } catch (err) {
+            setError(
+                err instanceof Error
+                    ? err.message
+                    : "Unable to resend confirmation email right now. Check your connection and try again.",
+            );
+        } finally {
+            setIsResending(false);
+        }
+    };
+
     const enterOfflineChildMode = (localProfileId?: string) => {
         setError("");
         setInfoMessage("");
+        setPendingConfirmationEmail("");
         setFieldErrors({});
-        storeEnterOfflineChildMode(localProfileId);
+        storeEnterOfflineChildMode(localProfileId ?? (selectedOfflineProfileId || undefined));
         router.replace("/board");
     };
 
@@ -218,20 +273,28 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
             activeProfileName,
             authSessionExpiresAt,
             offlineDesignatedProfiles,
+            selectedOfflineProfileId,
             identifier,
             password,
+            showPassword,
             name,
             username,
             email,
             role,
             confirmPassword,
+            showConfirmPassword,
             error,
             infoMessage,
+            pendingConfirmationEmail,
+            isResending,
             fieldErrors,
             isSubmitting,
         },
         actions: {
             setMode,
+            setSelectedOfflineProfileId: (localProfileId: string) => {
+                setSelectedOfflineProfileIdState(localProfileId);
+            },
             setIdentifier: (val: string) => {
                 setIdentifierState(val);
                 clearFieldError("identifier");
@@ -239,6 +302,9 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
             setPassword: (val: string) => {
                 setPasswordState(val);
                 clearFieldError("password");
+            },
+            toggleShowPassword: () => {
+                setShowPassword(prev => !prev);
             },
             setName: (val: string) => {
                 setNameState(val);
@@ -260,8 +326,12 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
                 setConfirmPasswordState(val);
                 clearFieldError("confirmPassword");
             },
+            toggleShowConfirmPassword: () => {
+                setShowConfirmPassword(prev => !prev);
+            },
             login,
             signup,
+            resendConfirmation,
             enterOfflineChildMode,
             logout,
         },

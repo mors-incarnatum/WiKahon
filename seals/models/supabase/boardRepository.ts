@@ -1,17 +1,15 @@
-import type { CatalogBoard, Tile } from "@/lib/board";
+import type { CatalogBoard, ColorSystemId, Tile } from "@/lib/board";
 import { isValidMediaId } from "@/models/boardData";
-import type { Word } from "@/models/word";
 import type { BoardSupabaseClient } from "./client";
 import type { ProfileMemberRole, ProfileMembershipRow, ProfileRow } from "./database.types";
 import {
-    boardFromRow,
+    boardEntryFromRow,
     boardToRow,
     tileFromRow,
     tileToRow,
-    wordFromRow,
-    wordToRow,
     settingsFromRow,
     settingsToRow,
+    type BoardEntry,
     type CloudSettings,
 } from "./mappers";
 
@@ -31,21 +29,18 @@ export const PROFILE_MEDIA_BUCKET = "profile-media";
 export interface IBoardRepository {
     listProfiles(): Promise<ProfileRow[]>;
     createProfile(name: string, ownerId: string): Promise<ProfileRow>;
+    deleteProfile(profileId: string): Promise<void>;
     listMemberships(profileId: string): Promise<ProfileMembershipRow[]>;
     setMembership(profileId: string, userId: string, role: ProfileMemberRole): Promise<void>;
     removeMembership(profileId: string, userId: string): Promise<void>;
-    listBoards(profileId: string): Promise<CatalogBoard[]>;
-    saveBoard(profileId: string, board: CatalogBoard): Promise<void>;
-    saveBoards(profileId: string, boards: CatalogBoard[]): Promise<void>;
+    listBoards(profileId: string): Promise<BoardEntry[]>;
+    saveBoard(profileId: string, board: CatalogBoard, catalogSystem?: ColorSystemId | null): Promise<void>;
+    saveBoards(profileId: string, boards: CatalogBoard[], catalogSystem?: ColorSystemId | null): Promise<void>;
     deleteBoards(profileId: string, boardIds: string[]): Promise<void>;
     listTiles(profileId: string): Promise<Tile[]>;
     saveTile(profileId: string, tile: Tile): Promise<void>;
     saveTiles(profileId: string, tiles: Tile[]): Promise<void>;
     deleteTiles(profileId: string, tileIds: string[]): Promise<void>;
-    listWords(profileId: string): Promise<Word[]>;
-    saveWord(profileId: string, word: Word): Promise<void>;
-    saveWords(profileId: string, words: Word[]): Promise<void>;
-    deleteWords(profileId: string, wordIds: string[]): Promise<void>;
     getSettings(profileId: string): Promise<CloudSettings | null>;
     saveSettings(profileId: string, settings: CloudSettings): Promise<void>;
     uploadProfileMedia(profileId: string, mediaId: string, blob: Blob, mimeType: string): Promise<void>;
@@ -65,6 +60,9 @@ export class SupabaseBoardRepository implements IBoardRepository {
     async createProfile(name: string, ownerId: string) {
         const { data } = await this.client.from("profiles").insert({ name, owner_id: ownerId }).select().single().throwOnError();
         return data!;
+    }
+    async deleteProfile(profileId: string) {
+        await this.client.from("profiles").delete().eq("id", profileId).throwOnError();
     }
     async listMemberships(profileId: string) {
         return readPages((from, to) =>
@@ -102,20 +100,20 @@ export class SupabaseBoardRepository implements IBoardRepository {
                     .range(from, to)
                     .throwOnError(),
             )
-        ).map(boardFromRow);
+        ).map(boardEntryFromRow);
     }
-    async saveBoard(profileId: string, board: CatalogBoard) {
+    async saveBoard(profileId: string, board: CatalogBoard, catalogSystem: ColorSystemId | null = null) {
         await this.client
             .from("boards")
-            .upsert(boardToRow(profileId, board), { onConflict: "profile_id,id" })
+            .upsert(boardToRow(profileId, board, catalogSystem), { onConflict: "profile_id,id" })
             .throwOnError();
     }
-    async saveBoards(profileId: string, boards: CatalogBoard[]) {
+    async saveBoards(profileId: string, boards: CatalogBoard[], catalogSystem: ColorSystemId | null = null) {
         if (boards.length === 0) return;
         await this.client
             .from("boards")
             .upsert(
-                boards.map(b => boardToRow(profileId, b)),
+                boards.map(b => boardToRow(profileId, b, catalogSystem)),
                 { onConflict: "profile_id,id" },
             )
             .throwOnError();
@@ -156,39 +154,6 @@ export class SupabaseBoardRepository implements IBoardRepository {
     async deleteTiles(profileId: string, tileIds: string[]) {
         if (tileIds.length === 0) return;
         await this.client.from("tiles").delete().eq("profile_id", profileId).in("id", tileIds).throwOnError();
-    }
-    async listWords(profileId: string) {
-        return (
-            await readPages((from, to) =>
-                this.client
-                    .from("words")
-                    .select("*")
-                    .eq("profile_id", profileId)
-                    .order("id")
-                    .range(from, to)
-                    .throwOnError(),
-            )
-        ).map(wordFromRow);
-    }
-    async saveWord(profileId: string, word: Word) {
-        await this.client
-            .from("words")
-            .upsert(wordToRow(profileId, word), { onConflict: "profile_id,id" })
-            .throwOnError();
-    }
-    async saveWords(profileId: string, words: Word[]) {
-        if (words.length === 0) return;
-        await this.client
-            .from("words")
-            .upsert(
-                words.map(w => wordToRow(profileId, w)),
-                { onConflict: "profile_id,id" },
-            )
-            .throwOnError();
-    }
-    async deleteWords(profileId: string, wordIds: string[]) {
-        if (wordIds.length === 0) return;
-        await this.client.from("words").delete().eq("profile_id", profileId).in("id", wordIds).throwOnError();
     }
     async getSettings(profileId: string) {
         const { data } = await this.client

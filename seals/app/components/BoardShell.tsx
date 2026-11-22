@@ -178,18 +178,38 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     </button>
                                 </>
                             )}
+                            {vm.state.canSyncCloud && (
+                                <button
+                                    type="button"
+                                    disabled={vm.state.syncingCloud}
+                                    onClick={() => void vm.actions.syncCloudNow()}
+                                    aria-label={vm.state.syncingCloud ? "Syncing board" : "Sync board"}
+                                    title="Sync board from cloud"
+                                >
+                                    {vm.state.syncingCloud ? "Syncing…" : "Sync"}
+                                </button>
+                            )}
                             <button type="button" onClick={vm.actions.logout}>
                                 Log out
                             </button>
                         </div>
                     </header>
 
+                    {vm.state.syncStatus && (
+                        <div className="edit-notice" role="status">
+                            <span>{vm.state.syncStatus}</span>{" "}
+                            <button type="button" onClick={vm.actions.clearSyncStatus}>
+                                Dismiss
+                            </button>
+                        </div>
+                    )}
+
                     {vm.state.storageError && (
                         <div className="edit-notice" role="alert">
                             <span>{vm.state.storageError}</span>{" "}
                             {vm.state.isGuardian && (
                                 <>
-                                    <button type="button" onClick={() => vm.actions.setPanel("settings")}>
+                                    <button type="button" onClick={() => vm.actions.setPanel("profiles")}>
                                         Open backup &amp; settings
                                     </button>{" "}
                                 </>
@@ -287,8 +307,12 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                             onManage={vm.actions.openCatalogs}
                         />
                     )}
-                    {vm.state.isGuardian && vm.state.panel === "settings" && (
-                        <BoardSettings boardId={vm.state.boardId} onClose={() => vm.actions.setPanel(null)} />
+                    {vm.state.isGuardian && (vm.state.panel === "settings" || vm.state.panel === "profiles") && (
+                        <BoardSettings
+                            boardId={vm.state.boardId}
+                            onClose={() => vm.actions.setPanel(null)}
+                            initialTab={vm.state.panel === "profiles" ? "profiles" : "colorSystem"}
+                        />
                     )}
                     {vm.state.isGuardian && vm.state.panel === "layout" && (
                         <BoardSettings

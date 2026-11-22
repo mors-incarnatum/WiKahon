@@ -1,13 +1,55 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
-import { ICONS, WORD_COLORS, type ColorKey, type WordClass, type LanguageTag } from "@/lib/board";
+import {
+    ICONS,
+    WORD_COLORS,
+    isSpeechIcon,
+    type ColorKey,
+    type WordClass,
+    type LanguageTag,
+    type Tile,
+} from "@/lib/board";
 import { palette } from "@/app/theme";
 import { useTileEditorViewModel, type TileEditorTarget } from "@/viewmodels/useTileEditorViewModel";
+import { useMediaUrl } from "@/viewmodels/useMediaUrl";
 import { TileVisual } from "./TileButton";
 import Modal from "./Modal";
 
+function WordGalleryItem({
+    tile,
+    selected,
+    disabled,
+    onSelect,
+}: {
+    tile: Tile;
+    selected: boolean;
+    disabled?: boolean;
+    onSelect: () => void;
+}) {
+    const { src } = useMediaUrl(tile.iconName, tile.mediaId);
+    return (
+        <button
+            type="button"
+            aria-pressed={selected}
+            disabled={disabled}
+            onClick={onSelect}
+        >
+            {isSpeechIcon(tile.iconName) && !tile.mediaId ? (
+                <span aria-hidden="true" className="text-2xl">
+                    💬
+                </span>
+            ) : src ? (
+                <img src={src} alt="" />
+            ) : null}
+            <span>{tile.label}</span>
+            {disabled && <span className="text-[10px] opacity-75">On board</span>}
+        </button>
+    );
+}
+
 export default function TileEditor(props: TileEditorTarget) {
     const { state: s, actions: a } = useTileEditorViewModel(props);
+    const tabs = props.multi ? ["existing", "custom"] : ["existing", "custom", "folder"];
     return (
         <Modal label="Tile editor" onClose={props.onClose} className="editor-modal">
             <div className="modal-heading">
@@ -19,7 +61,7 @@ export default function TileEditor(props: TileEditorTarget) {
             <div className="editor-columns">
                 <div>
                     <div className="tab-row" role="tablist" aria-label="Tile type">
-                        {["existing", "custom", "folder"].map(tab => (
+                        {tabs.map(tab => (
                             <button
                                 key={tab}
                                 type="button"
@@ -55,24 +97,20 @@ export default function TileEditor(props: TileEditorTarget) {
                             </div>
                             <div className="word-gallery">
                                 {s.words.map(t => (
-                                    <button
+                                    <WordGalleryItem
                                         key={t.id}
-                                        type="button"
-                                        aria-pressed={props.multi ? s.picked.includes(t.id) : s.preview.id === t.id}
-                                        onClick={() => a.chooseWord(t)}
-                                    >
-                                        {ICONS.find(i => i.name === t.iconName)?.stillPath && (
-                                            <img src={ICONS.find(i => i.name === t.iconName)!.stillPath} alt="" />
-                                        )}
-                                        <span>{t.label}</span>
-                                    </button>
+                                        tile={t}
+                                        selected={props.multi ? s.picked.includes(t.id) : s.selectedExisting?.id === t.id}
+                                        disabled={Boolean(props.multi && s.alreadyOnBoardIds.has(t.id))}
+                                        onSelect={() => a.chooseWord(t)}
+                                    />
                                 ))}
                             </div>
                             {s.words.length === 0 && <p>No matching words.</p>}
                             <button
                                 type="button"
                                 className="primary"
-                                disabled={props.multi ? !s.picked.length : !s.canSave || s.preview.kind !== "word"}
+                                disabled={props.multi ? !s.picked.length : !s.canSave}
                                 onClick={a.saveExisting}
                             >
                                 {props.multi ? `Add ${s.picked.length} selected words` : "Use selected word"}
@@ -82,14 +120,19 @@ export default function TileEditor(props: TileEditorTarget) {
 
                     {s.tab === "custom" && (
                         <>
+                            {s.isEditingWord && s.usageCount > 1 && (
+                                <p className="edit-notice" role="status">
+                                    Used in {s.usageCount} board slots. Saving updates all placements, or save as a new copy.
+                                </p>
+                            )}
                             <label>
                                 Label
-                                <input value={s.preview.label} onChange={e => a.patch({ label: e.target.value })} />
+                                <input value={s.customDraft.label} onChange={e => a.patch({ label: e.target.value })} />
                             </label>
                             <label>
                                 Spoken text (optional)
                                 <input
-                                    value={s.preview.spokenText ?? ""}
+                                    value={s.customDraft.spokenText ?? ""}
                                     onChange={e => a.patch({ spokenText: e.target.value })}
                                     placeholder="Defaults to the label"
                                 />
@@ -98,7 +141,7 @@ export default function TileEditor(props: TileEditorTarget) {
                                 <label>
                                     Language
                                     <select
-                                        value={s.preview.language ?? "fil"}
+                                        value={s.customDraft.language ?? "fil"}
                                         onChange={e => a.setLanguage(e.target.value as LanguageTag)}
                                     >
                                         <option value="fil">Filipino</option>
@@ -109,7 +152,7 @@ export default function TileEditor(props: TileEditorTarget) {
                                 <label>
                                     <input
                                         type="checkbox"
-                                        checked={Boolean(s.preview.isQuickPhrase)}
+                                        checked={Boolean(s.customDraft.isQuickPhrase)}
                                         onChange={e => a.patch({ isQuickPhrase: e.target.checked })}
                                     />{" "}
                                     Quick phrase
@@ -117,7 +160,12 @@ export default function TileEditor(props: TileEditorTarget) {
                             </div>
                             <label>
                                 Catalog
-                                <select value={s.preview.categoryId} onChange={e => a.patch({ categoryId: e.target.value })}>
+                                <select value={s.customDraft.categoryId} onChange={e => a.patch({ categoryId: e.target.value })}>
+                                    {s.customDraft.categoryId === "home" && <option value="home">Home</option>}
+                                    {!s.catalogs.some(b => b.id === s.customDraft.categoryId) &&
+                                        s.customDraft.categoryId !== "home" && (
+                                            <option value={s.customDraft.categoryId}>{s.customDraft.categoryId}</option>
+                                        )}
                                     {s.catalogs.map(b => (
                                         <option key={b.id} value={b.id}>
                                             {b.name}
@@ -128,7 +176,7 @@ export default function TileEditor(props: TileEditorTarget) {
                             <label>
                                 Color
                                 <select
-                                    value={s.preview.colorKey ?? ""}
+                                    value={s.customDraft.colorKey ?? ""}
                                     onChange={e => a.patch({ colorKey: (e.target.value || undefined) as ColorKey | undefined })}
                                 >
                                     <option value="">Use catalog color</option>
@@ -142,7 +190,7 @@ export default function TileEditor(props: TileEditorTarget) {
                             <label>
                                 Word class (modified palette)
                                 <select
-                                    value={s.preview.wordClass ?? "other"}
+                                    value={s.customDraft.wordClass ?? "other"}
                                     onChange={e => a.setWordClass(e.target.value as WordClass)}
                                 >
                                     {Object.keys(WORD_COLORS).map(c => (
@@ -160,7 +208,11 @@ export default function TileEditor(props: TileEditorTarget) {
                                         type="file"
                                         accept="image/jpeg,image/png,image/webp"
                                         aria-label="Upload tile photo"
-                                        onChange={e => void a.uploadPhoto(e.target.files?.[0])}
+                                        onChange={e => {
+                                            const file = e.target.files?.[0];
+                                            e.currentTarget.value = "";
+                                            void a.uploadPhoto(file);
+                                        }}
                                     />
                                     <label>
                                         <input
@@ -170,7 +222,7 @@ export default function TileEditor(props: TileEditorTarget) {
                                         />{" "}
                                         Crop square
                                     </label>
-                                    {s.preview.mediaId && (
+                                    {s.customDraft.mediaId && (
                                         <button type="button" onClick={a.removePhoto}>
                                             Remove photo
                                         </button>
@@ -185,14 +237,14 @@ export default function TileEditor(props: TileEditorTarget) {
                                 <div className="icon-gallery">
                                     <button
                                         type="button"
-                                        aria-pressed={s.preview.iconName === null && !s.preview.mediaId}
+                                        aria-pressed={s.customDraft.iconName === null && !s.customDraft.mediaId}
                                         onClick={() => a.patch({ iconName: null })}
                                     >
                                         Text only
                                     </button>
                                     <button
                                         type="button"
-                                        aria-pressed={s.preview.iconName === "speech"}
+                                        aria-pressed={isSpeechIcon(s.customDraft.iconName)}
                                         onClick={() => a.patch({ iconName: "speech" })}
                                     >
                                         💬 Speech
@@ -202,7 +254,7 @@ export default function TileEditor(props: TileEditorTarget) {
                                             key={icon.name}
                                             type="button"
                                             aria-label={icon.label}
-                                            aria-pressed={s.preview.iconName === icon.name}
+                                            aria-pressed={s.customDraft.iconName === icon.name}
                                             onClick={() => a.patch({ iconName: icon.name })}
                                         >
                                             <img src={icon.stillPath} alt="" />
@@ -211,13 +263,45 @@ export default function TileEditor(props: TileEditorTarget) {
                                     ))}
                                 </div>
                             </fieldset>
-                            <button type="button" className="primary" disabled={!s.canSave} onClick={a.saveCustom}>
-                                Save word
-                            </button>
+                            <div className="field-row">
+                                <button type="button" className="primary" disabled={!s.canSave} onClick={a.saveCustom}>
+                                    Save word
+                                </button>
+                                {s.isEditingWord && (
+                                    <button type="button" disabled={!s.canSave} onClick={a.saveCustomAsCopy}>
+                                        Save as new word
+                                    </button>
+                                )}
+                                {s.isEditingWord && !s.confirmDeleteWord && (
+                                    <button
+                                        type="button"
+                                        className="danger"
+                                        onClick={() => a.setConfirmDeleteWord(true)}
+                                    >
+                                        Delete word
+                                    </button>
+                                )}
+                            </div>
+                            {s.isEditingWord && s.confirmDeleteWord && (
+                                <div className="edit-notice" role="alert">
+                                    <p>
+                                        Delete &ldquo;{s.customDraft.label}&rdquo; permanently from your word library
+                                        {s.usageCount > 0 ? ` (${s.usageCount} board ${s.usageCount === 1 ? "slot" : "slots"})` : ""}?
+                                    </p>
+                                    <div className="field-row">
+                                        <button type="button" className="danger" onClick={a.deleteWord}>
+                                            Confirm delete
+                                        </button>
+                                        <button type="button" onClick={() => a.setConfirmDeleteWord(false)}>
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </>
                     )}
 
-                    {s.tab === "folder" && (
+                    {s.tab === "folder" && !props.multi && (
                         <>
                             <p>Open a catalog without clearing the sentence.</p>
                             <div className="filter-pills">
@@ -225,7 +309,7 @@ export default function TileEditor(props: TileEditorTarget) {
                                     <button
                                         key={b.id}
                                         type="button"
-                                        aria-pressed={s.preview.targetBoardId === b.id}
+                                        aria-pressed={s.selectedFolder?.targetBoardId === b.id}
                                         onClick={() => a.chooseFolder(b.id)}
                                     >
                                         ▰ {b.name}
@@ -246,7 +330,7 @@ export default function TileEditor(props: TileEditorTarget) {
                             <button
                                 type="button"
                                 className="primary"
-                                disabled={s.preview.kind !== "folder"}
+                                disabled={!s.canSave}
                                 onClick={a.saveFolder}
                             >
                                 Place folder

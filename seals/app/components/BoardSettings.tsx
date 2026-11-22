@@ -2,7 +2,6 @@
 import { useRef, useState } from "react";
 import { COLOR_SYSTEMS, GRID_PRESETS, type ColorSystemId } from "@/lib/board";
 import { useBoardSettingsViewModel } from "@/viewmodels/useBoardSettingsViewModel";
-import { useEditContext } from "@/viewmodels/useEditModeViewModel";
 import type { BoardData } from "@/models/boardData";
 import { isVibrationSupported } from "@/lib/haptics";
 import Modal from "./Modal";
@@ -47,14 +46,13 @@ function FieldErrors({ errors }: { errors?: string[] }) {
 export default function BoardSettings({
     boardId,
     onClose,
-    initialTab = "speech",
+    initialTab = "colorSystem",
 }: {
     boardId: string;
     onClose: () => void;
-    initialTab?: "layout" | "speech";
+    initialTab?: "layout" | "colorSystem" | "speech" | "profiles";
 }) {
     const { state: s, actions: a } = useBoardSettingsViewModel(boardId, initialTab);
-    const edit = useEditContext();
     const importInputRef = useRef<HTMLInputElement | null>(null);
 
     const widthUnits = getDimension(s.appearance.tileWidth);
@@ -145,7 +143,7 @@ export default function BoardSettings({
                         <button type="button" role="tab" aria-selected={s.tab === "layout"} onClick={() => a.setTab("layout")}>Grid</button>
                         <button type="button" role="tab" aria-selected={s.tab === "appearance"} onClick={() => a.setTab("appearance")}>Appearance</button>
                     </div>
-                    <fieldset hidden={s.tab !== "layout"} disabled={!edit.state.isEditMode}>
+                    <fieldset hidden={s.tab !== "layout"}>
                         <legend>Board size</legend>
 
                         <div className="settings-section">
@@ -315,7 +313,7 @@ export default function BoardSettings({
                         )}
                     </fieldset>
 
-                    <fieldset hidden={s.tab !== "appearance"} disabled={!edit.state.isEditMode}>
+                    <fieldset hidden={s.tab !== "appearance"}>
                         <legend>Tile appearance</legend>
 
                         <div className="settings-section">
@@ -424,11 +422,10 @@ export default function BoardSettings({
                     </fieldset>
 
                     <div className="settings-section">
-                        {s.canRollbackReflow && <button type="button" disabled={!edit.state.isEditMode} onClick={a.rollbackReflow}>Undo reflow</button>}
+                        {s.canRollbackReflow && <button type="button" onClick={a.rollbackReflow}>Undo reflow</button>}
                         <button
                             type="button"
                             className="primary"
-                            disabled={!edit.state.isEditMode}
                             onClick={a.apply}
                         >
                             Apply Changes
@@ -474,7 +471,7 @@ export default function BoardSettings({
                         </button>
                     </div>
 
-                    <fieldset hidden={s.tab !== "colorSystem"} disabled={!edit.state.isEditMode}>
+                    <fieldset hidden={s.tab !== "colorSystem"}>
                         <legend>Color Key</legend>
                         <div className="settings-section">
                             <span>Color coding system</span>
@@ -501,7 +498,7 @@ export default function BoardSettings({
                         </div>
                     </fieldset>
 
-                    <fieldset hidden={s.tab !== "speech"} disabled={!edit.state.isEditMode}>
+                    <fieldset hidden={s.tab !== "speech"}>
                         <legend>Speech</legend>
                         <div className="settings-section">
                             <label>
@@ -561,7 +558,7 @@ export default function BoardSettings({
                         </div>
                     </fieldset>
 
-                    <fieldset hidden={s.tab !== "access"} disabled={!edit.state.isEditMode}>
+                    <fieldset hidden={s.tab !== "access"}>
                         <legend>Access</legend>
                         <div className="settings-section">
                             <label>
@@ -649,11 +646,28 @@ export default function BoardSettings({
                             >
                                 {s.profiles.map(p => (
                                     <option key={p.localProfileId} value={p.localProfileId}>
-                                        {p.name}
+                                        {p.name}{p.cloudProfileId ? " (Cloud)" : ""}
                                     </option>
                                 ))}
                             </select>
                         </label>
+                        <div className="field-row">
+                            <label>
+                                Rename active profile
+                                <input
+                                    value={s.renameDraft}
+                                    onChange={e => a.setRenameDraft(e.target.value)}
+                                    placeholder="Profile name"
+                                />
+                            </label>
+                            <button
+                                type="button"
+                                disabled={!s.renameDraft.trim() || s.renameDraft.trim() === s.activeProfileName}
+                                onClick={a.saveProfileRename}
+                            >
+                                Rename
+                            </button>
+                        </div>
                         <div className="field-row">
                             <label>
                                 New profile name
@@ -671,12 +685,23 @@ export default function BoardSettings({
                                 Create profile
                             </button>
                             {s.profiles.length > 1 && (
-                                <button
-                                    type="button"
-                                    onClick={() => a.deleteProfile(s.activeProfileId)}
-                                >
-                                    Delete active profile
-                                </button>
+                                s.confirmDeleteProfileId !== s.activeProfileId ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => a.requestDeleteProfile(s.activeProfileId)}
+                                    >
+                                        Delete active profile
+                                    </button>
+                                ) : (
+                                    <div className="flex flex-wrap gap-2">
+                                        <button type="button" onClick={a.confirmDeleteProfile}>
+                                            Confirm delete
+                                        </button>
+                                        <button type="button" onClick={a.cancelDeleteProfile}>
+                                            Cancel
+                                        </button>
+                                    </div>
+                                )
                             )}
                         </div>
                         <label>
@@ -720,7 +745,7 @@ export default function BoardSettings({
                                 {s.offlineReadiness.localStorageOk ? "Yes" : "Check storage warning"}
                             </li>
                             <li>Stored profile media: {s.offlineReadiness.mediaCount} item(s)</li>
-                            <li>Speech requires an internet connection.</li>
+                            <li>Offline speech fallback: Web Speech API</li>
                         </ul>
                         <button type="button" onClick={() => void a.refreshOfflineReadiness()}>
                             Re-check offline readiness
@@ -742,7 +767,11 @@ export default function BoardSettings({
                                 type="file"
                                 accept="application/json,.json"
                                 hidden
-                                onChange={e => void a.importBackupFile(e.target.files?.[0])}
+                                onChange={e => {
+                                    const file = e.target.files?.[0];
+                                    e.currentTarget.value = "";
+                                    void a.importBackupFile(file);
+                                }}
                             />
                         </div>
                         {s.backupStatus && <p role="status">{s.backupStatus.message}</p>}
@@ -806,20 +835,50 @@ export default function BoardSettings({
                                     <>
                                         <h4>Cloud profiles</h4>
                                         <ul>
-                                            {s.cloudProfiles.map(cp => (
-                                                <li key={cp.id}>
-                                                    {cp.name} (rev {cp.revision ?? 1}){" "}
-                                                    <button
-                                                        type="button"
-                                                        disabled={s.cloudBusy}
-                                                        onClick={() =>
-                                                            void a.downloadCloudProfile(cp)
-                                                        }
-                                                    >
-                                                        Download as local copy
-                                                    </button>
-                                                </li>
-                                            ))}
+                                            {s.cloudProfiles.map(cp => {
+                                                const isOwner = Boolean(s.cloudUser && cp.owner_id === s.cloudUser.id);
+                                                const isConfirmingCloudDelete = s.confirmDeleteCloudProfileId === cp.id;
+                                                return (
+                                                    <li key={cp.id}>
+                                                        {cp.name} (rev {cp.revision ?? 1}){" "}
+                                                        <button
+                                                            type="button"
+                                                            disabled={s.cloudBusy}
+                                                            onClick={() =>
+                                                                void a.downloadCloudProfile(cp)
+                                                            }
+                                                        >
+                                                            Download as local copy
+                                                        </button>{" "}
+                                                        {isOwner && (!isConfirmingCloudDelete ? (
+                                                            <button
+                                                                type="button"
+                                                                disabled={s.cloudBusy}
+                                                                onClick={() => a.requestDeleteCloudProfile(cp.id)}
+                                                            >
+                                                                Delete from cloud
+                                                            </button>
+                                                        ) : (
+                                                            <>
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={s.cloudBusy}
+                                                                    onClick={() => void a.deleteCloudProfile(cp)}
+                                                                >
+                                                                    Confirm cloud delete
+                                                                </button>{" "}
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={s.cloudBusy}
+                                                                    onClick={a.cancelDeleteCloudProfile}
+                                                                >
+                                                                    Cancel
+                                                                </button>
+                                                            </>
+                                                        ))}
+                                                    </li>
+                                                );
+                                            })}
                                         </ul>
                                     </>
                                 )}
@@ -831,175 +890,335 @@ export default function BoardSettings({
                             <section className="settings-section">
                                 <h3>Child accounts</h3>
                                 <p>
-                                    Create read-only child accounts linked to one of your published
-                                    cloud boards. Children sign in on the login screen using their
-                                    username and password.
+                                    Create read-only child accounts and optionally assign one of
+                                    your published cloud boards. Children sign in on the login
+                                    screen using their username and password.
                                 </p>
+
+                                {s.childLoading && <p>Loading child accounts…</p>}
+
+                                {s.childProvisioningError && (
+                                    <p role="alert" className="text-rose-700">
+                                        {s.childProvisioningError}
+                                    </p>
+                                )}
 
                                 {s.provisionedChildren.length > 0 && (
                                     <>
-                                        <h4>Linked child accounts</h4>
-                                        <ul>
-                                            {s.provisionedChildren.map(child => (
-                                                <li key={`${child.profileId}:${child.userId}`}>
-                                                    <strong>{child.name}</strong> (@{child.username}) —{" "}
-                                                    {child.profileName}{" "}
-                                                    <button
-                                                        type="button"
-                                                        disabled={s.childBusy}
-                                                        onClick={() =>
-                                                            void a.removeChildProfileAccess(
-                                                                child.profileId,
-                                                                child.userId,
-                                                            )
-                                                        }
-                                                    >
-                                                        Remove access
-                                                    </button>
-                                                </li>
-                                            ))}
+                                        <h4>Child accounts</h4>
+                                        <ul className="space-y-3">
+                                            {s.provisionedChildren.map(child => {
+                                                const isEditing = s.editingChildId === child.userId;
+                                                const isResetting = s.resettingChildId === child.userId;
+                                                const isConfirmingDelete = s.confirmDeleteChildId === child.userId;
+                                                return (
+                                                    <li key={child.userId} className="rounded-xl border border-slate-200 p-3">
+                                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                                            <span>
+                                                                <strong>{child.name}</strong> (@{child.username}) —{" "}
+                                                                {child.profileName ?? "No board assigned"}
+                                                            </span>
+                                                            <div className="flex flex-wrap gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={s.childBusy}
+                                                                    onClick={() => a.startEditChild(child)}
+                                                                >
+                                                                    Edit
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={s.childBusy}
+                                                                    onClick={() => a.startResetChildPassword(child.userId)}
+                                                                >
+                                                                    Reset password
+                                                                </button>
+                                                                {child.profileId && (
+                                                                    <button
+                                                                        type="button"
+                                                                        disabled={s.childBusy}
+                                                                        onClick={() =>
+                                                                            void a.removeChildProfileAccess(
+                                                                                child.profileId!,
+                                                                                child.userId,
+                                                                            )
+                                                                        }
+                                                                    >
+                                                                        Unassign board
+                                                                    </button>
+                                                                )}
+                                                                {!isConfirmingDelete ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        disabled={s.childBusy}
+                                                                        onClick={() => a.requestDeleteChild(child.userId)}
+                                                                    >
+                                                                        Delete account
+                                                                    </button>
+                                                                ) : (
+                                                                    <>
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={s.childBusy}
+                                                                            onClick={() => void a.confirmDeleteChild()}
+                                                                        >
+                                                                            Confirm delete
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={s.childBusy}
+                                                                            onClick={a.cancelDeleteChild}
+                                                                        >
+                                                                            Cancel
+                                                                        </button>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        {isEditing && (
+                                                            <form
+                                                                noValidate
+                                                                className="mt-3 space-y-2"
+                                                                onSubmit={e => {
+                                                                    e.preventDefault();
+                                                                    void a.saveChildEdit();
+                                                                }}
+                                                            >
+                                                                <label>
+                                                                    Display name
+                                                                    <input
+                                                                        type="text"
+                                                                        value={s.editChildName}
+                                                                        aria-invalid={Boolean(s.editChildFieldErrors.name?.length)}
+                                                                        onChange={e => a.setEditChildName(e.target.value)}
+                                                                    />
+                                                                    <FieldErrors errors={s.editChildFieldErrors.name} />
+                                                                </label>
+                                                                <label>
+                                                                    Assigned cloud board (optional)
+                                                                    <select
+                                                                        value={s.editChildProfileId}
+                                                                        aria-invalid={Boolean(s.editChildFieldErrors.profileId?.length)}
+                                                                        onChange={e => a.setEditChildProfileId(e.target.value)}
+                                                                    >
+                                                                        <option value="">No board assigned</option>
+                                                                        {s.ownedCloudProfiles.map(cp => (
+                                                                            <option key={cp.id} value={cp.id}>
+                                                                                {cp.name}
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                    <FieldErrors errors={s.editChildFieldErrors.profileId} />
+                                                                </label>
+                                                                <div className="field-row">
+                                                                    <button type="submit" className="primary" disabled={s.childBusy}>
+                                                                        Save changes
+                                                                    </button>
+                                                                    <button type="button" disabled={s.childBusy} onClick={a.cancelEditChild}>
+                                                                        Cancel
+                                                                    </button>
+                                                                </div>
+                                                            </form>
+                                                        )}
+
+                                                        {isResetting && (
+                                                            <form
+                                                                noValidate
+                                                                className="mt-3 space-y-2"
+                                                                onSubmit={e => {
+                                                                    e.preventDefault();
+                                                                    void a.submitChildPasswordReset();
+                                                                }}
+                                                            >
+                                                                <label>
+                                                                    New password (min 6 characters)
+                                                                    <input
+                                                                        type="password"
+                                                                        autoComplete="new-password"
+                                                                        value={s.resetChildPassword}
+                                                                        aria-invalid={Boolean(s.resetChildFieldErrors.password?.length)}
+                                                                        onChange={e => a.setResetChildPassword(e.target.value)}
+                                                                    />
+                                                                    <FieldErrors errors={s.resetChildFieldErrors.password} />
+                                                                </label>
+                                                                <label>
+                                                                    Confirm new password
+                                                                    <input
+                                                                        type="password"
+                                                                        autoComplete="new-password"
+                                                                        value={s.resetChildConfirmPassword}
+                                                                        aria-invalid={Boolean(s.resetChildFieldErrors.confirmPassword?.length)}
+                                                                        onChange={e => a.setResetChildConfirmPassword(e.target.value)}
+                                                                    />
+                                                                    <FieldErrors errors={s.resetChildFieldErrors.confirmPassword} />
+                                                                </label>
+                                                                <div className="field-row">
+                                                                    <button type="submit" className="primary" disabled={s.childBusy}>
+                                                                        Update password
+                                                                    </button>
+                                                                    <button type="button" disabled={s.childBusy} onClick={a.cancelResetChildPassword}>
+                                                                        Cancel
+                                                                    </button>
+                                                                </div>
+                                                            </form>
+                                                        )}
+                                                    </li>
+                                                );
+                                            })}
                                         </ul>
                                     </>
                                 )}
 
-                                {s.ownedCloudProfiles.length === 0 ? (
-                                    <p>
-                                        Publish a board profile to the cloud above before creating a
-                                        child account so it has a board to sync.
-                                    </p>
-                                ) : (
-                                    <form
-                                        noValidate
-                                        onSubmit={e => {
-                                            e.preventDefault();
-                                            void a.provisionChildAccount();
-                                        }}
-                                    >
-                                        <label>
-                                            Assigned cloud board
-                                            <select
-                                                value={s.childProfileId}
-                                                aria-invalid={Boolean(
-                                                    s.childFieldErrors.profileId?.length,
-                                                )}
-                                                onChange={e => a.setChildProfileId(e.target.value)}
-                                            >
-                                                {s.ownedCloudProfiles.map(cp => (
-                                                    <option key={cp.id} value={cp.id}>
-                                                        {cp.name}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                            <FieldErrors errors={s.childFieldErrors.profileId} />
-                                        </label>
+                                <form
+                                    noValidate
+                                    onSubmit={e => {
+                                        e.preventDefault();
+                                        void a.provisionChildAccount();
+                                    }}
+                                >
+                                    <label>
+                                        Assigned cloud board (optional)
+                                        <select
+                                            value={s.childProfileId}
+                                            aria-invalid={Boolean(
+                                                s.childFieldErrors.profileId?.length,
+                                            )}
+                                            onChange={e => a.setChildProfileId(e.target.value)}
+                                        >
+                                            <option value="">No board assigned (assign later)</option>
+                                            {s.ownedCloudProfiles.map(cp => (
+                                                <option key={cp.id} value={cp.id}>
+                                                    {cp.name}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <FieldErrors errors={s.childFieldErrors.profileId} />
+                                    </label>
 
-                                        <label>
-                                            Child name
-                                            <input
-                                                type="text"
-                                                name="childName"
-                                                autoComplete="off"
-                                                value={s.childName}
-                                                aria-invalid={Boolean(
-                                                    s.childFieldErrors.name?.length,
-                                                )}
-                                                onChange={e => a.setChildName(e.target.value)}
-                                                placeholder="e.g., Lily"
-                                            />
-                                            <FieldErrors errors={s.childFieldErrors.name} />
-                                        </label>
+                                    <label>
+                                        Child name
+                                        <input
+                                            type="text"
+                                            name="childName"
+                                            autoComplete="off"
+                                            value={s.childName}
+                                            aria-invalid={Boolean(
+                                                s.childFieldErrors.name?.length,
+                                            )}
+                                            onChange={e => a.setChildName(e.target.value)}
+                                            placeholder="e.g., Lily"
+                                        />
+                                        <FieldErrors errors={s.childFieldErrors.name} />
+                                    </label>
 
-                                        <label>
-                                            Username
-                                            <input
-                                                type="text"
-                                                name="childUsername"
-                                                autoComplete="off"
-                                                value={s.childUsername}
-                                                aria-invalid={Boolean(
-                                                    s.childFieldErrors.username?.length,
-                                                )}
-                                                onChange={e => a.setChildUsername(e.target.value)}
-                                                placeholder="e.g., lily"
-                                            />
-                                            <FieldErrors errors={s.childFieldErrors.username} />
-                                        </label>
+                                    <label>
+                                        Username
+                                        <input
+                                            type="text"
+                                            name="childUsername"
+                                            autoComplete="off"
+                                            value={s.childUsername}
+                                            aria-invalid={Boolean(
+                                                s.childFieldErrors.username?.length,
+                                            )}
+                                            onChange={e => a.setChildUsername(e.target.value)}
+                                            placeholder="e.g., lily"
+                                        />
+                                        <FieldErrors errors={s.childFieldErrors.username} />
+                                    </label>
 
-                                        <label>
-                                            Email (optional)
-                                            <input
-                                                type="email"
-                                                name="childEmail"
-                                                autoComplete="off"
-                                                value={s.childEmail}
-                                                aria-invalid={Boolean(
-                                                    s.childFieldErrors.email?.length,
-                                                )}
-                                                onChange={e => a.setChildEmail(e.target.value)}
-                                                placeholder="Optional — child can sign in with username"
-                                            />
-                                            <FieldErrors errors={s.childFieldErrors.email} />
-                                        </label>
+                                    <label>
+                                        Email (optional)
+                                        <input
+                                            type="email"
+                                            name="childEmail"
+                                            autoComplete="off"
+                                            value={s.childEmail}
+                                            aria-invalid={Boolean(
+                                                s.childFieldErrors.email?.length,
+                                            )}
+                                            onChange={e => a.setChildEmail(e.target.value)}
+                                            placeholder="Optional — child can sign in with username"
+                                        />
+                                        <FieldErrors errors={s.childFieldErrors.email} />
+                                    </label>
 
-                                        <label>
-                                            Password (min 6 characters)
-                                            <input
-                                                type="password"
-                                                name="childPassword"
-                                                autoComplete="new-password"
-                                                value={s.childPassword}
-                                                aria-invalid={Boolean(
-                                                    s.childFieldErrors.password?.length,
-                                                )}
-                                                onChange={e => a.setChildPassword(e.target.value)}
-                                                placeholder="Enter password"
-                                            />
-                                            <FieldErrors errors={s.childFieldErrors.password} />
-                                        </label>
+                                    <label>
+                                        Password (min 6 characters)
+                                        <input
+                                            type="password"
+                                            name="childPassword"
+                                            autoComplete="new-password"
+                                            value={s.childPassword}
+                                            aria-invalid={Boolean(
+                                                s.childFieldErrors.password?.length,
+                                            )}
+                                            onChange={e => a.setChildPassword(e.target.value)}
+                                            placeholder="Enter password"
+                                        />
+                                        <FieldErrors errors={s.childFieldErrors.password} />
+                                    </label>
 
-                                        <label>
-                                            Confirm password
-                                            <input
-                                                type="password"
-                                                name="childConfirmPassword"
-                                                autoComplete="new-password"
-                                                value={s.childConfirmPassword}
-                                                aria-invalid={Boolean(
-                                                    s.childFieldErrors.confirmPassword?.length,
-                                                )}
-                                                onChange={e =>
-                                                    a.setChildConfirmPassword(e.target.value)
-                                                }
-                                                placeholder="Re-enter password"
-                                            />
-                                            <FieldErrors
-                                                errors={s.childFieldErrors.confirmPassword}
-                                            />
-                                        </label>
+                                    <label>
+                                        Confirm password
+                                        <input
+                                            type="password"
+                                            name="childConfirmPassword"
+                                            autoComplete="new-password"
+                                            value={s.childConfirmPassword}
+                                            aria-invalid={Boolean(
+                                                s.childFieldErrors.confirmPassword?.length,
+                                            )}
+                                            onChange={e =>
+                                                a.setChildConfirmPassword(e.target.value)
+                                            }
+                                            placeholder="Re-enter password"
+                                        />
+                                        <FieldErrors
+                                            errors={s.childFieldErrors.confirmPassword}
+                                        />
+                                    </label>
 
-                                        <div className="field-row">
-                                            <button
-                                                type="submit"
-                                                className="primary"
-                                                disabled={s.childBusy}
-                                            >
-                                                {s.childBusy
-                                                    ? "Creating child account…"
-                                                    : "Create child account"}
-                                            </button>
-                                        </div>
-                                    </form>
-                                )}
+                                    <div className="field-row">
+                                        <button
+                                            type="submit"
+                                            className="primary"
+                                            disabled={s.childBusy}
+                                        >
+                                            {s.childBusy
+                                                ? "Creating child account…"
+                                                : "Create child account"}
+                                        </button>
+                                    </div>
+                                </form>
 
                                 {s.childStatus && (
-                                    <p
-                                        role={s.childStatus.ok ? "status" : "alert"}
-                                        className={
-                                            s.childStatus.ok ? "text-emerald-800" : "text-rose-700"
-                                        }
-                                    >
-                                        {s.childStatus.message}
-                                    </p>
+                                    <div className="space-y-1">
+                                        <p
+                                            role={s.childStatus.ok ? "status" : "alert"}
+                                            className={
+                                                s.childStatus.ok ? "text-emerald-800" : "text-rose-700"
+                                            }
+                                        >
+                                            {s.childStatus.message}
+                                        </p>
+                                        {s.childStatus.ok && s.lastCreatedChild && (
+                                            <div className="field-row">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void a.copyChildSignInInfo()}
+                                                >
+                                                    Copy username
+                                                </button>
+                                                {s.childCopyFeedback && (
+                                                    <span role="status" className="text-xs text-emerald-800">
+                                                        {s.childCopyFeedback}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
                                 )}
                             </section>
                         )}
@@ -1077,16 +1296,6 @@ export default function BoardSettings({
                         </label>
                     </fieldset>
                 </>
-            )}
-
-            {!edit.state.isEditMode && (
-                <p>
-                    Enable{" "}
-                    <button type="button" onClick={edit.actions.enter}>
-                        Edit mode
-                    </button>{" "}
-                    to change settings.
-                </p>
             )}
         </Modal>
     );

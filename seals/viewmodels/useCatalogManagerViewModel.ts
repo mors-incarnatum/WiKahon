@@ -1,17 +1,22 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { useBoardStore } from "@/store/BoardProvider";
-import type { ColorKey } from "@/lib/board";
+import type { CellKey, ColorKey } from "@/lib/board";
 
 export function useCatalogManagerViewModel() {
+    const pathname = usePathname();
+    const router = useRouter();
     const boards = useBoardStore(s => s.boards);
+    const tiles = useBoardStore(s => s.tiles);
     const order = useBoardStore(s => s.catalogOrder);
     const create = useBoardStore(s => s.createCatalog);
     const update = useBoardStore(s => s.updateCatalog);
     const remove = useBoardStore(s => s.deleteCatalog);
     const reorder = useBoardStore(s => s.reorderCatalog);
     const folder = useBoardStore(s => s.placeFolderOnHome);
+    const assignSlot = useBoardStore(s => s.assignSlot);
     const colorSystem = useBoardStore(s => s.colorSystem ?? "custom");
 
     const [selected, setSelected] = useState<string | null>(null);
@@ -23,6 +28,19 @@ export function useCatalogManagerViewModel() {
     const [confirmDelete, setDelete] = useState<string | null>(null);
     const [adding, setAdding] = useState<string | null>(null);
     const [message, setMessage] = useState("");
+
+    const homeCatalogIds = useMemo(() => {
+        const ids = new Set<string>();
+        boards.home?.pages.forEach(page => {
+            Object.values(page.cells).forEach(cell => {
+                const tile = cell ? tiles[cell.tileId] : undefined;
+                if (tile?.kind === "folder" && tile.targetBoardId) {
+                    ids.add(tile.targetBoardId);
+                }
+            });
+        });
+        return ids;
+    }, [boards.home, tiles]);
 
     const reset = () => {
         setSelected(null);
@@ -45,7 +63,7 @@ export function useCatalogManagerViewModel() {
             adding,
             message,
             colorSystem,
-            homePlacements: new Set(boards.home?.pages.flatMap(page => Object.values(page.cells).map(c => c?.tileId)) ?? []),
+            homeCatalogIds,
         },
         actions: {
             setName,
@@ -58,6 +76,7 @@ export function useCatalogManagerViewModel() {
             reset,
             startCreate: () => {
                 if (colorSystem !== "custom") return;
+                setMessage("");
                 reset();
                 setPlace(true);
                 setSelected("new");
@@ -66,6 +85,7 @@ export function useCatalogManagerViewModel() {
                 if (colorSystem !== "custom") return;
                 const b = boards[id];
                 if (!b) return;
+                setMessage("");
                 setSelected(id);
                 setName(b.name);
                 setShortName(b.shortName);
@@ -94,7 +114,17 @@ export function useCatalogManagerViewModel() {
                 reset();
             },
             deleteConfirmed: () => {
-                if (confirmDelete) remove(confirmDelete);
+                if (confirmDelete) {
+                    const deletedId = confirmDelete;
+                    remove(deletedId);
+                    if (
+                        pathname === `/board/${encodeURIComponent(deletedId)}` ||
+                        pathname === `/board/${deletedId}`
+                    ) {
+                        router.replace("/board");
+                    }
+                    setMessage("Catalog deleted");
+                }
                 setDelete(null);
                 reset();
             },
@@ -102,6 +132,24 @@ export function useCatalogManagerViewModel() {
             placeFolder: (id: string) => {
                 folder(id);
                 setMessage("Folder placed on Home");
+            },
+            removeFolderFromHome: (id: string) => {
+                const homePages = boards.home?.pages ?? [];
+                const targets: { pageIndex: number; key: CellKey }[] = [];
+                homePages.forEach((page, pageIndex) => {
+                    Object.entries(page.cells).forEach(([key, cell]) => {
+                        const tile = cell ? tiles[cell.tileId] : undefined;
+                        if (tile?.kind === "folder" && tile.targetBoardId === id) {
+                            targets.push({ pageIndex, key: key as CellKey });
+                        }
+                    });
+                });
+                targets
+                    .sort((a, b) => b.pageIndex - a.pageIndex)
+                    .forEach(({ pageIndex, key }) => assignSlot("home", pageIndex, key, null));
+                if (targets.length > 0) {
+                    setMessage("Folder removed from Home");
+                }
             },
         },
     };

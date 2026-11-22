@@ -1,22 +1,32 @@
 "use client";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useBoardSelector, useBoardStoreApi } from "@/store/BoardProvider";
 import { clampGrid, inBounds, type GridConfig, type ColorSystemId } from "@/lib/board";
 import { SpeechError, ttsService } from "@/services/tts/ttsService";
 import { exportProfilePackage, validateAndPrepareImport } from "@/services/storage/backupService";
 import { discardPreparedMedia, mediaRepository } from "@/services/storage/mediaRepository";
+import { localProfileService } from "@/services/storage/localProfileService";
 import { extractBoardData } from "@/store/useBoardStore";
 import type { BoardData, FeatureFlags } from "@/models/boardData";
+import { PROFILE_SCHEMA_VERSION } from "@/models/profile";
 import { LOCAL_CHILD_SESSION, type ProvisionedChildAccount } from "@/models/auth";
 import { cloudSyncService, type CloudUser } from "@/services/cloud/cloudSyncService";
 import type { ProfileRow } from "@/models/supabase/database.types";
 import {
+    deleteChildAccountServerAction,
     listProvisionedChildAccountsServerAction,
     provisionChildAccountServerAction,
     removeChildProfileAccessServerAction,
+    resetChildPasswordServerAction,
+    updateChildAccountServerAction,
 } from "@/app/actions/childAccounts";
-import { validateChildProvisionInput, type ValidationFieldErrors } from "@/lib/validation";
+import {
+    validateChildPasswordResetInput,
+    validateChildProvisionInput,
+    validateChildUpdateInput,
+    type ValidationFieldErrors,
+} from "@/lib/validation";
 
 export type SettingsTab = "layout" | "appearance" | "colorSystem" | "speech" | "access" | "profiles" | "experiments";
 
@@ -26,7 +36,13 @@ export interface OfflineReadiness {
     mediaCount: number;
 }
 
-export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsTab = "speech") {
+export interface LastCreatedChildInfo {
+    name: string;
+    username: string;
+    profileName: string | null;
+}
+
+export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsTab = "colorSystem") {
     const store = useBoardStoreApi();
     const router = useRouter();
     const {
@@ -105,14 +121,47 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         recoverLegacyProfile: s.recoverLegacyProfile,
     }));
 
-    const [scope, setScope] = useState("global");
-    const [selected, setSelected] = useState(boards[boardId] ? boardId : "home");
-    const [draft, setDraft] = useState(global);
-    const [draftMode, setDraftMode] = useState<"manual" | "automatic">(globalMode);
-    const [draftAppearance, setDraftAppearance] = useState(appearance);
-    const [useGlobal, setUseGlobal] = useState(false);
-    const [saved, setSaved] = useState(false);
-    const [tab, setTab] = useState<SettingsTab>(initialTab === "speech" ? "colorSystem" : initialTab);
+    const [draftGeneration, setDraftGeneration] = useState(0);
+    const draftKey = `${activeProfileId}:${colorSystem}:${draftGeneration}`;
+    const [editorDrafts, setEditorDrafts] = useState(() => ({
+        key: draftKey,
+        scope: "global",
+        selected: boards[boardId] ? boardId : "home",
+        draft: global,
+        draftMode: globalMode,
+        draftAppearance: appearance,
+        useGlobal: false,
+        saved: false,
+    }));
+    const activeEditorDrafts = useMemo(() => {
+        if (editorDrafts.key === draftKey) {
+            if (boards[editorDrafts.selected]) {
+                return editorDrafts;
+            }
+            return {
+                ...editorDrafts,
+                selected: "home",
+                draft: editorDrafts.scope === "global" ? global : (boards.home?.gridOverride ?? global),
+                draftMode: editorDrafts.scope === "global" ? globalMode : (boards.home?.layoutModeOverride ?? globalMode),
+            };
+        }
+        const nextSelected = boards[editorDrafts.selected] ? editorDrafts.selected : "home";
+        const targetBoard = boards[nextSelected];
+        return {
+            key: draftKey,
+            scope: editorDrafts.scope,
+            selected: nextSelected,
+            draft: editorDrafts.scope === "global" ? global : (targetBoard?.gridOverride ?? global),
+            draftMode: editorDrafts.scope === "global" ? globalMode : (targetBoard?.layoutModeOverride ?? globalMode),
+            draftAppearance: appearance,
+            useGlobal: false,
+            saved: false,
+        };
+    }, [appearance, boards, draftKey, editorDrafts, global, globalMode]);
+
+    const { scope, selected, draft, draftMode, draftAppearance, useGlobal, saved } = activeEditorDrafts;
+
+    const [tab, setTab] = useState<SettingsTab>(initialTab);
     const [colorDraft, setColorDraft] = useState({
         profileId: activeProfileId,
         system: colorSystem,
@@ -126,6 +175,11 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
     const [speechPreviewError, setSpeechPreviewError] = useState("");
 
     const [newProfileName, setNewProfileName] = useState("");
+    const renameKey = `${activeProfileId}:${activeProfileName}`;
+    const [renameDraftState, setRenameDraftState] = useState({ key: renameKey, value: activeProfileName });
+    const renameDraft = renameDraftState.key === renameKey ? renameDraftState.value : activeProfileName;
+    const [confirmDeleteProfileId, setConfirmDeleteProfileId] = useState<string | null>(null);
+    const activeConfirmDeleteProfileId = confirmDeleteProfileId === activeProfileId ? confirmDeleteProfileId : null;
     const [backupStatus, setBackupStatus] = useState<{ ok: boolean; message: string } | null>(null);
     const [recoveryStatus, setRecoveryStatus] = useState<{ ok: boolean; message: string } | null>(null);
     const [recoveringId, setRecoveringId] = useState<string | null>(null);
@@ -142,8 +196,12 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
     const [cloudProfiles, setCloudProfiles] = useState<ProfileRow[]>([]);
     const [cloudStatus, setCloudStatus] = useState<{ ok: boolean; message: string } | null>(null);
     const [cloudBusy, setCloudBusy] = useState(false);
+    const [confirmDeleteCloudProfileId, setConfirmDeleteCloudProfileId] = useState<string | null>(null);
     const [staleConflictProfileId, setStaleConflictProfileId] = useState<string | null>(null);
+
     const [provisionedChildren, setProvisionedChildren] = useState<ProvisionedChildAccount[]>([]);
+    const [childLoading, setChildLoading] = useState(false);
+    const [childProvisioningError, setChildProvisioningError] = useState<string | null>(null);
     const [childName, setChildNameState] = useState("");
     const [childUsername, setChildUsernameState] = useState("");
     const [childEmail, setChildEmailState] = useState("");
@@ -153,20 +211,33 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
     const [childFieldErrors, setChildFieldErrors] = useState<ValidationFieldErrors>({});
     const [childStatus, setChildStatus] = useState<{ ok: boolean; message: string } | null>(null);
     const [childBusy, setChildBusy] = useState(false);
+    const [lastCreatedChild, setLastCreatedChild] = useState<LastCreatedChildInfo | null>(null);
+    const [childCopyFeedback, setChildCopyFeedback] = useState<string | null>(null);
+    const copyFeedbackTimerRef = useRef<number | null>(null);
+
+    const [editingChildId, setEditingChildId] = useState<string | null>(null);
+    const [editChildName, setEditChildNameState] = useState("");
+    const [editChildProfileId, setEditChildProfileIdState] = useState("");
+    const [editChildFieldErrors, setEditChildFieldErrors] = useState<ValidationFieldErrors>({});
+
+    const [resettingChildId, setResettingChildId] = useState<string | null>(null);
+    const [resetChildPassword, setResetChildPasswordState] = useState("");
+    const [resetChildConfirmPassword, setResetChildConfirmPasswordState] = useState("");
+    const [resetChildFieldErrors, setResetChildFieldErrors] = useState<ValidationFieldErrors>({});
+
+    const [confirmDeleteChildId, setConfirmDeleteChildId] = useState<string | null>(null);
 
     const ownedCloudProfiles = useMemo(
         () => (sessionCloudUser ? cloudProfiles.filter(cp => cp.owner_id === sessionCloudUser.id) : []),
         [cloudProfiles, sessionCloudUser],
     );
-    const childProfileId = useMemo(() => {
-        if (ownedCloudProfiles.some(cp => cp.id === selectedChildProfileId)) {
-            return selectedChildProfileId;
-        }
-        if (cloudProfileId && ownedCloudProfiles.some(cp => cp.id === cloudProfileId)) {
-            return cloudProfileId;
-        }
-        return ownedCloudProfiles[0]?.id ?? "";
-    }, [ownedCloudProfiles, selectedChildProfileId, cloudProfileId]);
+    const childProfileId = useMemo(
+        () =>
+            selectedChildProfileId && ownedCloudProfiles.some(cp => cp.id === selectedChildProfileId)
+                ? selectedChildProfileId
+                : "",
+        [ownedCloudProfiles, selectedChildProfileId],
+    );
     const matchingCloudProfile = useMemo(
         () => (cloudProfileId ? cloudProfiles.find(cp => cp.id === cloudProfileId) ?? null : null),
         [cloudProfileId, cloudProfiles],
@@ -181,18 +252,24 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         mediaCount: 0,
     });
 
+    useEffect(() => () => {
+        if (copyFeedbackTimerRef.current !== null) {
+            window.clearTimeout(copyFeedbackTimerRef.current);
+        }
+    }, []);
+
     const refreshOfflineReadiness = useCallback(async () => {
         const media = await mediaRepository.listProfileMedia(activeProfileId);
         let appShellCached = false;
         if (typeof caches !== "undefined" && "serviceWorker" in navigator) {
             try {
                 const registration = await navigator.serviceWorker.getRegistration("/board");
-                const route = registration?.active?.state === "activated" && await caches.match("/board", { cacheName: "wikahon-shell-v4" });
+                const route = registration?.active?.state === "activated" && await caches.match("/board", { cacheName: "wikahon-shell-v5" });
                 if (route) {
                     const html = await route.text();
                     const assets = [...html.matchAll(/(?:src|href)=["']([^"']*\/_next\/static\/[^"']+\.(?:js|css)(?:\?[^"']*)?)["']/g)].map(match => match[1].replace(/&amp;/g, "&"));
                     appShellCached = assets.length > 0 && (await Promise.all(
-                        assets.map(asset => caches.match(asset, { cacheName: "wikahon-shell-v4" })),
+                        assets.map(asset => caches.match(asset, { cacheName: "wikahon-shell-v5" })),
                     )).every(Boolean);
                 }
             } catch {
@@ -205,25 +282,76 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             mediaCount: media.length,
         });
         if (cloudSyncService.isConfigured() && sessionCloudUser) {
-            const [res, childRes] = await Promise.all([
-                cloudSyncService.listCloudProfiles(sessionCloudUser.id),
-                listProvisionedChildAccountsServerAction().catch(() => ({
-                    ok: false,
-                    children: [] as ProvisionedChildAccount[],
-                })),
-            ]);
-            setCloudProfiles(res.profiles);
-            setProvisionedChildren(childRes.ok ? childRes.children : []);
+            setChildLoading(true);
+            try {
+                const [res, childRes] = await Promise.all([
+                    cloudSyncService.listCloudProfiles(sessionCloudUser.id),
+                    listProvisionedChildAccountsServerAction().catch((err: unknown) => ({
+                        ok: false,
+                        children: [] as ProvisionedChildAccount[],
+                        error: err instanceof Error ? err.message : "Could not load child accounts.",
+                    })),
+                ]);
+                setCloudProfiles(res.profiles);
+                if (childRes.ok) {
+                    setProvisionedChildren(childRes.children);
+                    setChildProvisioningError(null);
+                } else {
+                    setProvisionedChildren([]);
+                    setChildProvisioningError(childRes.error ?? "Could not load child accounts.");
+                }
+            } finally {
+                setChildLoading(false);
+            }
         } else {
             setCloudProfiles([]);
             setProvisionedChildren([]);
+            setChildProvisioningError(null);
+            setChildLoading(false);
         }
     }, [activeProfileId, sessionCloudUser, storageStatus]);
+
+    useEffect(() => {
+        if (tab !== "profiles") return;
+        let active = true;
+        void Promise.resolve().then(() => {
+            if (active) {
+                void refreshOfflineReadiness();
+            }
+        });
+        return () => {
+            active = false;
+        };
+    }, [tab, refreshOfflineReadiness]);
 
     const clearChildFieldError = (...fields: string[]) => {
         if (childStatus) setChildStatus(null);
         if (fields.some(field => Boolean(childFieldErrors[field]))) {
             setChildFieldErrors(prev => {
+                const next = { ...prev };
+                for (const field of fields) {
+                    delete next[field];
+                }
+                return next;
+            });
+        }
+    };
+
+    const clearEditChildFieldError = (...fields: string[]) => {
+        if (fields.some(field => Boolean(editChildFieldErrors[field]))) {
+            setEditChildFieldErrors(prev => {
+                const next = { ...prev };
+                for (const field of fields) {
+                    delete next[field];
+                }
+                return next;
+            });
+        }
+    };
+
+    const clearResetChildFieldError = (...fields: string[]) => {
+        if (fields.some(field => Boolean(resetChildFieldErrors[field]))) {
+            setResetChildFieldErrors(prev => {
                 const next = { ...prev };
                 for (const field of fields) {
                     delete next[field];
@@ -254,23 +382,24 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         if (boardId !== "home" && !store.getState().boards[boardId]) router.replace("/board");
     };
 
-    const resetTileDimensions = () => {
-        setDraftAppearance(current => ({
-            ...current,
-            tileWidth: 50,
-            tileHeight: 50,
-        }));
-    };
+    const resetTileDimensions = (appearanceValue: BoardData["tileAppearance"]) => ({
+        ...appearanceValue,
+        tileWidth: 50,
+        tileHeight: 50,
+    });
 
     const resetDrafts = (nextScope: string, nextSelected: string) => {
         const board = boards[nextSelected];
-        setDraft(nextScope === "global" ? global : board?.gridOverride ?? global);
-        setDraftMode(
-            nextScope === "global" ? globalMode : board?.layoutModeOverride ?? globalMode,
-        );
-        setDraftAppearance(appearance);
-        setUseGlobal(false);
-        setSaved(false);
+        setEditorDrafts({
+            key: draftKey,
+            scope: nextScope,
+            selected: nextSelected,
+            draft: nextScope === "global" ? global : board?.gridOverride ?? global,
+            draftMode: nextScope === "global" ? globalMode : board?.layoutModeOverride ?? globalMode,
+            draftAppearance: appearance,
+            useGlobal: false,
+            saved: false,
+        });
     };
 
     const exportBackupJson = async (): Promise<string> => {
@@ -323,6 +452,21 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         return importBackupJson(await file.text());
     };
 
+    const refreshChildAccounts = async () => {
+        const childRes = await listProvisionedChildAccountsServerAction().catch((err: unknown) => ({
+            ok: false,
+            children: [] as ProvisionedChildAccount[],
+            error: err instanceof Error ? err.message : "Could not load child accounts.",
+        }));
+        if (childRes.ok) {
+            setProvisionedChildren(childRes.children);
+            setChildProvisioningError(null);
+            return true;
+        }
+        setChildProvisioningError(childRes.error ?? "Could not load child accounts.");
+        return false;
+    };
+
     return {
         state: {
             tab,
@@ -348,6 +492,8 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             profiles,
             activeProfileId,
             activeProfileName,
+            renameDraft,
+            confirmDeleteProfileId: activeConfirmDeleteProfileId,
             cloudProfileId,
             cloudRevision,
             dirty,
@@ -360,7 +506,10 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             ownedCloudProfiles,
             cloudStatus,
             cloudBusy,
+            confirmDeleteCloudProfileId,
             provisionedChildren: sessionCloudUser ? provisionedChildren : [],
+            childLoading,
+            childProvisioningError,
             childName,
             childUsername,
             childEmail,
@@ -370,6 +519,17 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             childFieldErrors,
             childStatus,
             childBusy,
+            lastCreatedChild,
+            childCopyFeedback,
+            editingChildId,
+            editChildName,
+            editChildProfileId,
+            editChildFieldErrors,
+            resettingChildId,
+            resetChildPassword,
+            resetChildConfirmPassword,
+            resetChildFieldErrors,
+            confirmDeleteChildId,
             newProfileName,
             backupStatus,
             offlineReadiness,
@@ -382,43 +542,54 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         actions: {
             setTab: (nextTab: SettingsTab) => {
                 setTab(nextTab);
-                if (nextTab === "profiles") {
-                    void refreshOfflineReadiness();
-                }
             },
             setScope: (value: string) => {
-                setScope(value);
                 resetDrafts(value, selected);
             },
             selectBoard: (id: string) => {
-                setSelected(id);
                 resetDrafts(scope, id);
             },
             setDraft: (grid: GridConfig) => {
                 const nextGrid = clampGrid(grid);
-                setDraft(nextGrid);
-                resetTileDimensions();
-                setSaved(false);
+                setEditorDrafts({
+                    ...activeEditorDrafts,
+                    draft: nextGrid,
+                    draftAppearance: resetTileDimensions(activeEditorDrafts.draftAppearance),
+                    saved: false,
+                });
             },
             setDraftMode: (mode: "manual" | "automatic") => {
-                if (mode !== draftMode) {
-                    resetTileDimensions();
-                }
-                setDraftMode(mode);
-                setSaved(false);
+                setEditorDrafts({
+                    ...activeEditorDrafts,
+                    draftMode: mode,
+                    draftAppearance:
+                        mode !== draftMode
+                            ? resetTileDimensions(activeEditorDrafts.draftAppearance)
+                            : activeEditorDrafts.draftAppearance,
+                    saved: false,
+                });
             },
             swapRowsCols: () => {
-                setDraft({ rows: draft.cols, cols: draft.rows });
-                resetTileDimensions();
-                setSaved(false);
+                setEditorDrafts({
+                    ...activeEditorDrafts,
+                    draft: { rows: draft.cols, cols: draft.rows },
+                    draftAppearance: resetTileDimensions(activeEditorDrafts.draftAppearance),
+                    saved: false,
+                });
             },
             setAppearance: (value: Partial<BoardData["tileAppearance"]> | BoardData["tileAppearance"]) => {
-                setDraftAppearance(current => ({ ...current, ...value }));
-                setSaved(false);
+                setEditorDrafts({
+                    ...activeEditorDrafts,
+                    draftAppearance: { ...activeEditorDrafts.draftAppearance, ...value },
+                    saved: false,
+                });
             },
             setUseGlobal: (value: boolean) => {
-                setUseGlobal(value);
-                setSaved(false);
+                setEditorDrafts({
+                    ...activeEditorDrafts,
+                    useGlobal: value,
+                    saved: false,
+                });
             },
             apply: () => {
                 applyBoardSettings(
@@ -428,34 +599,47 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                     scope === "global" ? undefined : selected,
                     scope !== "global" && useGlobal,
                 );
-                setSaved(true);
+                setEditorDrafts({
+                    ...activeEditorDrafts,
+                    saved: true,
+                });
             },
             reflow: () => {
-                setSaved(reflow(draft, scope === "global" ? undefined : selected));
+                setEditorDrafts({
+                    ...activeEditorDrafts,
+                    saved: reflow(draft, scope === "global" ? undefined : selected),
+                });
             },
             rollbackReflow: () => {
                 if (rollbackReflow() && preReflowSnapshot) {
                     const previousBoard = preReflowSnapshot.boards.find(board => board.boardId === selected);
-                    setDraft(scope === "global"
-                        ? preReflowSnapshot.previousGlobalGrid
-                        : previousBoard?.previousGrid ?? preReflowSnapshot.previousGlobalGrid);
-                    setSaved(false);
+                    setEditorDrafts({
+                        ...activeEditorDrafts,
+                        draft: scope === "global"
+                            ? preReflowSnapshot.previousGlobalGrid
+                            : previousBoard?.previousGrid ?? preReflowSnapshot.previousGlobalGrid,
+                        saved: false,
+                    });
                 }
             },
             useGlobal: () => {
-                setUseGlobal(true);
-                setSaved(false);
+                setEditorDrafts({
+                    ...activeEditorDrafts,
+                    useGlobal: true,
+                    saved: false,
+                });
             },
             setDraftColorSystem: (value: ColorSystemId) => setColorDraft({ ...currentColorDraft, system: value, saved: false }),
             setDraftColorMode: (value: BoardData["tileAppearance"]["colorMode"]) => setColorDraft({ ...currentColorDraft, mode: value, saved: false }),
             applyColorSettings: () => {
-                const saved = setColorSystem(currentColorDraft.system, currentColorDraft.mode);
-                setColorDraft({ ...currentColorDraft, saved });
-                if (saved) returnHomeIfCatalogClosed();
+                const savedColor = setColorSystem(currentColorDraft.system, currentColorDraft.mode);
+                setColorDraft({ ...currentColorDraft, saved: savedColor });
+                if (savedColor) returnHomeIfCatalogClosed();
             },
             resetBoardData: () => {
                 const ok = resetBoardData();
                 if (ok) {
+                    setDraftGeneration(g => g + 1);
                     setColorDraft({ profileId: activeProfileId, system: "custom", mode: "catalog", saved: false });
                     returnHomeIfCatalogClosed();
                 }
@@ -479,6 +663,13 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                 }
             },
             setNewProfileName,
+            setRenameDraft: (value: string) => setRenameDraftState({ key: renameKey, value }),
+            saveProfileRename: () => {
+                const trimmed = renameDraft.trim();
+                if (!trimmed || trimmed === activeProfileName) return;
+                renameProfile(activeProfileId, trimmed);
+                setRenameDraftState({ key: `${activeProfileId}:${trimmed}`, value: trimmed });
+            },
             switchProfile,
             createProfile: () => {
                 if (!newProfileName.trim()) return;
@@ -487,6 +678,17 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             },
             renameActiveProfile: (name: string) => renameProfile(activeProfileId, name),
             deleteProfile,
+            requestDeleteProfile: (profileId: string) => {
+                setConfirmDeleteProfileId(profileId);
+            },
+            cancelDeleteProfile: () => {
+                setConfirmDeleteProfileId(null);
+            },
+            confirmDeleteProfile: () => {
+                if (!confirmDeleteProfileId) return;
+                deleteProfile(confirmDeleteProfileId);
+                setConfirmDeleteProfileId(null);
+            },
             toggleActiveProfileOfflineDesignated: (enabled: boolean) =>
                 setProfileOfflineDesignated(activeProfileId, enabled),
             recoverLegacyBoard: async (legacyProfileId: string) => {
@@ -572,6 +774,65 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                     setCloudBusy(false);
                 }
             },
+            requestDeleteCloudProfile: (profileId: string) => {
+                setConfirmDeleteCloudProfileId(profileId);
+            },
+            cancelDeleteCloudProfile: () => {
+                setConfirmDeleteCloudProfileId(null);
+            },
+            deleteCloudProfile: async (profile: ProfileRow) => {
+                if (!sessionCloudUser || cloudBusy) return;
+                setCloudBusy(true);
+                setCloudStatus(null);
+                try {
+                    const res = await cloudSyncService.deleteCloudProfile(profile.id, sessionCloudUser.id);
+                    if (!res.ok) {
+                        setCloudStatus({ ok: false, message: res.error ?? "Could not delete cloud profile." });
+                        return;
+                    }
+                    setConfirmDeleteCloudProfileId(null);
+                    setStaleConflictProfileId(null);
+
+                    const storeState = store.getState();
+                    const linkedLocalProfiles = storeState.profiles.filter(p => p.cloudProfileId === profile.id);
+                    if (linkedLocalProfiles.length > 0) {
+                        for (const linked of linkedLocalProfiles) {
+                            const loaded = localProfileService.loadProfileDocument(linked.localProfileId, sessionCloudUser.id);
+                            if (loaded.doc) {
+                                localProfileService.saveProfileDocument({
+                                    ...loaded.doc,
+                                    cloudProfileId: null,
+                                    cloudRevision: null,
+                                    dirty: true,
+                                    localEditVersion: (loaded.doc.localEditVersion ?? 0) + 1,
+                                });
+                            }
+                        }
+                        localProfileService.saveActiveIndex(
+                            {
+                                schemaVersion: PROFILE_SCHEMA_VERSION,
+                                activeProfileId: storeState.activeProfileId,
+                                profiles: storeState.profiles.map(p =>
+                                    p.cloudProfileId === profile.id ? { ...p, cloudProfileId: null } : p,
+                                ),
+                            },
+                            sessionCloudUser.id,
+                        );
+                        storeState.reloadLocalProfiles();
+                    }
+
+                    const listRes = await cloudSyncService.listCloudProfiles(sessionCloudUser.id);
+                    if (listRes.ok) {
+                        setCloudProfiles(listRes.profiles);
+                    } else {
+                        setCloudProfiles(prev => prev.filter(cp => cp.id !== profile.id));
+                    }
+                    await refreshChildAccounts();
+                    setCloudStatus({ ok: true, message: `Deleted "${profile.name}" from the cloud.` });
+                } finally {
+                    setCloudBusy(false);
+                }
+            },
             setChildName: (value: string) => {
                 setChildNameState(value);
                 clearChildFieldError("name");
@@ -634,24 +895,193 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                     setChildPasswordState("");
                     setChildConfirmPasswordState("");
                     setChildFieldErrors({});
+                    setChildCopyFeedback(null);
+                    setLastCreatedChild({
+                        name: createdChild.name,
+                        username: createdChild.username,
+                        profileName: createdChild.profileName,
+                    });
                     setChildStatus({
                         ok: true,
-                        message: `Created child account for ${createdChild.name} (username: "${createdChild.username}") linked to "${createdChild.profileName}". They can sign in on the login screen with their username and password.`,
+                        message: createdChild.profileName
+                            ? `Created child account for ${createdChild.name} (username: "${createdChild.username}") linked to "${createdChild.profileName}". They can sign in on the login screen with their username and password.`
+                            : `Created child account for ${createdChild.name} (username: "${createdChild.username}") with no board assigned yet. You can assign a cloud board anytime below.`,
                     });
 
-                    const listRes = await listProvisionedChildAccountsServerAction().catch(() => ({
-                        ok: false,
-                        children: [] as ProvisionedChildAccount[],
-                    }));
-                    if (listRes.ok) {
-                        setProvisionedChildren(listRes.children);
-                    } else {
+                    const refreshed = await refreshChildAccounts();
+                    if (!refreshed) {
                         setProvisionedChildren(prev => [...prev, createdChild]);
                     }
                 } catch (err) {
                     setChildStatus({
                         ok: false,
                         message: err instanceof Error ? err.message : "Could not create child account.",
+                    });
+                } finally {
+                    setChildBusy(false);
+                }
+            },
+            copyChildSignInInfo: async () => {
+                if (!lastCreatedChild) return;
+                const summary = lastCreatedChild.profileName
+                    ? `Username: ${lastCreatedChild.username}\nBoard: ${lastCreatedChild.profileName}`
+                    : `Username: ${lastCreatedChild.username}`;
+                try {
+                    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(summary);
+                        setChildCopyFeedback("Copied username & sign-in info.");
+                    } else {
+                        setChildCopyFeedback(`Username: ${lastCreatedChild.username}`);
+                    }
+                } catch {
+                    setChildCopyFeedback(`Username: ${lastCreatedChild.username}`);
+                }
+                if (copyFeedbackTimerRef.current !== null) {
+                    window.clearTimeout(copyFeedbackTimerRef.current);
+                }
+                copyFeedbackTimerRef.current = window.setTimeout(() => {
+                    setChildCopyFeedback(null);
+                    copyFeedbackTimerRef.current = null;
+                }, 2500);
+            },
+            startEditChild: (child: ProvisionedChildAccount) => {
+                setChildStatus(null);
+                setEditChildFieldErrors({});
+                setResettingChildId(null);
+                setConfirmDeleteChildId(null);
+                setEditingChildId(child.userId);
+                setEditChildNameState(child.name);
+                setEditChildProfileIdState(child.profileId ?? "");
+            },
+            cancelEditChild: () => {
+                setEditingChildId(null);
+                setEditChildNameState("");
+                setEditChildProfileIdState("");
+                setEditChildFieldErrors({});
+            },
+            setEditChildName: (value: string) => {
+                setEditChildNameState(value);
+                clearEditChildFieldError("name");
+            },
+            setEditChildProfileId: (value: string) => {
+                setEditChildProfileIdState(value);
+                clearEditChildFieldError("profileId");
+            },
+            saveChildEdit: async () => {
+                if (!sessionCloudUser || !editingChildId || childBusy) return;
+                setChildStatus(null);
+                setEditChildFieldErrors({});
+
+                const validation = validateChildUpdateInput({
+                    childUserId: editingChildId,
+                    name: editChildName,
+                    profileId: editChildProfileId,
+                });
+                if (!validation.ok) {
+                    setEditChildFieldErrors(validation.fieldErrors);
+                    setChildStatus({ ok: false, message: validation.error });
+                    return;
+                }
+
+                setChildBusy(true);
+                try {
+                    const res = await updateChildAccountServerAction(validation.data);
+                    if (!res.ok || !res.child) {
+                        setEditChildFieldErrors(res.fieldErrors ?? {});
+                        setChildStatus({
+                            ok: false,
+                            message: res.error ?? "Could not update child account.",
+                        });
+                        return;
+                    }
+                    const updatedChild = res.child;
+                    setProvisionedChildren(prev =>
+                        prev.map(c => (c.userId === updatedChild.userId ? updatedChild : c)),
+                    );
+                    setEditingChildId(null);
+                    setEditChildNameState("");
+                    setEditChildProfileIdState("");
+                    setEditChildFieldErrors({});
+                    setChildStatus({
+                        ok: true,
+                        message: updatedChild.profileName
+                            ? `Updated ${updatedChild.name} (@${updatedChild.username}) — assigned to "${updatedChild.profileName}".`
+                            : `Updated ${updatedChild.name} (@${updatedChild.username}) — no board assigned.`,
+                    });
+                } catch (err) {
+                    setChildStatus({
+                        ok: false,
+                        message: err instanceof Error ? err.message : "Could not update child account.",
+                    });
+                } finally {
+                    setChildBusy(false);
+                }
+            },
+            startResetChildPassword: (childUserId: string) => {
+                setChildStatus(null);
+                setResetChildFieldErrors({});
+                setEditingChildId(null);
+                setConfirmDeleteChildId(null);
+                setResettingChildId(childUserId);
+                setResetChildPasswordState("");
+                setResetChildConfirmPasswordState("");
+            },
+            cancelResetChildPassword: () => {
+                setResettingChildId(null);
+                setResetChildPasswordState("");
+                setResetChildConfirmPasswordState("");
+                setResetChildFieldErrors({});
+            },
+            setResetChildPassword: (value: string) => {
+                setResetChildPasswordState(value);
+                clearResetChildFieldError("password");
+            },
+            setResetChildConfirmPassword: (value: string) => {
+                setResetChildConfirmPasswordState(value);
+                clearResetChildFieldError("confirmPassword");
+            },
+            submitChildPasswordReset: async () => {
+                if (!sessionCloudUser || !resettingChildId || childBusy) return;
+                setChildStatus(null);
+                setResetChildFieldErrors({});
+
+                const validation = validateChildPasswordResetInput({
+                    childUserId: resettingChildId,
+                    password: resetChildPassword,
+                    confirmPassword: resetChildConfirmPassword,
+                });
+                if (!validation.ok) {
+                    setResetChildFieldErrors(validation.fieldErrors);
+                    setChildStatus({ ok: false, message: validation.error });
+                    return;
+                }
+
+                setChildBusy(true);
+                try {
+                    const res = await resetChildPasswordServerAction(validation.data);
+                    if (!res.ok) {
+                        setResetChildFieldErrors(res.fieldErrors ?? {});
+                        setChildStatus({
+                            ok: false,
+                            message: res.error ?? "Could not reset child password.",
+                        });
+                        return;
+                    }
+                    const target = provisionedChildren.find(c => c.userId === resettingChildId);
+                    setResettingChildId(null);
+                    setResetChildPasswordState("");
+                    setResetChildConfirmPasswordState("");
+                    setResetChildFieldErrors({});
+                    setChildStatus({
+                        ok: true,
+                        message: target
+                            ? `Updated password for ${target.name} (@${target.username}).`
+                            : "Updated child account password.",
+                    });
+                } catch (err) {
+                    setChildStatus({
+                        ok: false,
+                        message: err instanceof Error ? err.message : "Could not reset child password.",
                     });
                 } finally {
                     setChildBusy(false);
@@ -669,21 +1099,66 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                     if (!res.ok) {
                         setChildStatus({
                             ok: false,
-                            message: res.error ?? "Could not remove child access.",
+                            message: res.error ?? "Could not unassign board.",
                         });
                         return;
                     }
                     setProvisionedChildren(prev =>
-                        prev.filter(c => !(c.profileId === profileId && c.userId === childUserId)),
+                        prev.map(c =>
+                            c.userId === childUserId && c.profileId === profileId
+                                ? { ...c, profileId: null, profileName: null }
+                                : c,
+                        ),
                     );
                     setChildStatus({
                         ok: true,
-                        message: "Removed child access from that board profile.",
+                        message: "Unassigned board from child account. The account remains active.",
                     });
                 } catch (err) {
                     setChildStatus({
                         ok: false,
-                        message: err instanceof Error ? err.message : "Could not remove child access.",
+                        message: err instanceof Error ? err.message : "Could not unassign board.",
+                    });
+                } finally {
+                    setChildBusy(false);
+                }
+            },
+            requestDeleteChild: (childUserId: string) => {
+                setChildStatus(null);
+                setEditingChildId(null);
+                setResettingChildId(null);
+                setConfirmDeleteChildId(childUserId);
+            },
+            cancelDeleteChild: () => {
+                setConfirmDeleteChildId(null);
+            },
+            confirmDeleteChild: async () => {
+                if (!sessionCloudUser || !confirmDeleteChildId || childBusy) return;
+                setChildStatus(null);
+                setChildBusy(true);
+                try {
+                    const targetId = confirmDeleteChildId;
+                    const target = provisionedChildren.find(c => c.userId === targetId);
+                    const res = await deleteChildAccountServerAction({ childUserId: targetId });
+                    if (!res.ok) {
+                        setChildStatus({
+                            ok: false,
+                            message: res.error ?? "Could not delete child account.",
+                        });
+                        return;
+                    }
+                    setProvisionedChildren(prev => prev.filter(c => c.userId !== targetId));
+                    setConfirmDeleteChildId(null);
+                    setChildStatus({
+                        ok: true,
+                        message: target
+                            ? `Deleted child account for ${target.name} (@${target.username}).`
+                            : "Deleted child account.",
+                    });
+                } catch (err) {
+                    setChildStatus({
+                        ok: false,
+                        message: err instanceof Error ? err.message : "Could not delete child account.",
                     });
                 } finally {
                     setChildBusy(false);

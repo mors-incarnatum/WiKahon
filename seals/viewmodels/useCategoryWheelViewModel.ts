@@ -22,7 +22,8 @@ export function useCategoryWheelViewModel(onClose: () => void) {
     const router = useRouter();
     const [more, setMore] = useState(false);
 
-    const ids = order.length > 8 ? [...order.slice(0, 7), "more"] : order;
+    const validOrder = order.filter(id => Boolean(boards[id]));
+    const ids = validOrder.length > 8 ? [...validOrder.slice(0, 7), "more"] : validOrder;
     const sectors = ids.map((id, i) => {
         const start = -90 + (i * 360) / ids.length;
         const end = start + 360 / ids.length;
@@ -76,7 +77,7 @@ export function useCategoryWheelViewModel(onClose: () => void) {
         state: {
             sectors,
             more,
-            catalogs: order.map(id => boards[id]),
+            catalogs: validOrder.map(id => boards[id]).filter(Boolean),
         },
         actions: {
             choose,

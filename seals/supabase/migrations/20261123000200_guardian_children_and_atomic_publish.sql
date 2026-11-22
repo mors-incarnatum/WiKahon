@@ -1,32 +1,111 @@
--- App user roles, server-controlled user_accounts table, and security-definer
--- publish_profile_snapshot update supporting public.words and editor members.
+-- Guardian-child linkage on user_accounts and atomic profile rename inside publish_profile_snapshot.
 begin;
 
-create type public.app_user_role as enum ('PARENT', 'CAREGIVER', 'CHILD');
+-- 1. Link child accounts directly to their guardian auth user
+alter table public.user_accounts
+  add column if not exists guardian_id uuid references auth.users(id) on delete set null;
 
-create table public.user_accounts (
-  user_id uuid primary key references auth.users(id) on delete cascade,
-  username text not null unique check (length(btrim(username)) between 2 and 64),
-  display_name text not null check (length(btrim(display_name)) between 1 and 120),
-  role public.app_user_role not null default 'CHILD',
-  password_hash text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
+create index if not exists user_accounts_guardian_id_idx
+  on public.user_accounts(guardian_id);
 
-alter table public.user_accounts enable row level security;
+-- Backfill existing CHILD rows using the earliest profile owner linked via profile_memberships
+update public.user_accounts ua
+set guardian_id = sub.owner_id
+from (
+  select distinct on (pm.user_id)
+    pm.user_id,
+    p.owner_id
+  from public.profile_memberships pm
+  join public.profiles p on p.id = pm.profile_id
+  order by pm.user_id, p.created_at asc, pm.created_at asc, p.id asc
+) sub
+where ua.user_id = sub.user_id
+  and ua.role = 'CHILD'
+  and ua.guardian_id is null;
 
-create policy user_accounts_self_read on public.user_accounts
-  for select to authenticated
-  using (user_id = (select auth.uid()));
+-- 2. Populate guardian_id from raw_app_meta_data when provisioning auth users
+create or replace function private.handle_new_auth_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_app_role text;
+  v_role public.app_user_role;
+  v_suffix text;
+  v_username text;
+  v_display_name text;
+  v_guardian_id uuid;
+begin
+  v_app_role := upper(coalesce(new.raw_app_meta_data->>'role', ''));
+  if v_app_role in ('PARENT', 'CAREGIVER', 'CHILD') then
+    v_role := v_app_role::public.app_user_role;
+  elsif upper(coalesce(new.raw_user_meta_data->>'guardian_type', '')) = 'PARENT' then
+    v_role := 'PARENT'::public.app_user_role;
+  else
+    v_role := 'CAREGIVER'::public.app_user_role;
+  end if;
 
-create trigger touch_updated_at before update on public.user_accounts
-  for each row execute function private.touch_updated_at();
+  v_suffix := left(replace(new.id::text, '-', ''), 8);
+  v_username := left(
+    regexp_replace(
+      lower(coalesce(new.raw_user_meta_data->>'username', new.raw_app_meta_data->>'username', '')),
+      '[^a-z0-9._-]+',
+      '',
+      'g'
+    ),
+    64
+  );
+  if length(v_username) < 2 then
+    v_username := left(
+      regexp_replace(lower(split_part(coalesce(new.email, ''), '@', 1)), '[^a-z0-9._-]+', '', 'g'),
+      64
+    );
+  end if;
+  if length(v_username) < 2 then
+    v_username := 'user_' || v_suffix;
+  end if;
 
-revoke all on public.user_accounts from anon, authenticated;
-grant select on public.user_accounts to authenticated;
+  if exists (
+    select 1
+    from public.user_accounts ua
+    where ua.username = v_username
+      and ua.user_id <> new.id
+  ) then
+    v_username := left(v_username, 55) || '_' || v_suffix;
+  end if;
 
-drop function if exists public.publish_profile_snapshot(uuid, integer, jsonb, jsonb, jsonb);
+  v_display_name := btrim(left(btrim(coalesce(new.raw_user_meta_data->>'name', new.raw_app_meta_data->>'name', '')), 120));
+  if length(v_display_name) < 1 then
+    v_display_name := v_username;
+  end if;
+
+  v_guardian_id := private.try_parse_uuid(new.raw_app_meta_data->>'guardian_id');
+  if v_guardian_id is not null and not exists (select 1 from auth.users u where u.id = v_guardian_id) then
+    v_guardian_id := null;
+  end if;
+
+  insert into public.user_accounts (user_id, username, display_name, role, guardian_id)
+  values (new.id, v_username, v_display_name, v_role, v_guardian_id)
+  on conflict (user_id) do nothing;
+
+  update auth.users
+  set raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || jsonb_build_object(
+    'role', v_role::text,
+    'username', v_username,
+    'name', v_display_name
+  )
+  where id = new.id;
+
+  return new;
+end;
+$$;
+
+revoke all on function private.handle_new_auth_user() from public;
+
+-- 3. Atomic snapshot publish with optional owner-only profile rename
+drop function if exists public.publish_profile_snapshot(uuid, integer, jsonb, jsonb, jsonb, jsonb);
 
 create or replace function public.publish_profile_snapshot(
   p_profile_id uuid,
@@ -34,7 +113,8 @@ create or replace function public.publish_profile_snapshot(
   p_boards jsonb,
   p_tiles jsonb,
   p_words jsonb default '[]'::jsonb,
-  p_settings jsonb default '{}'::jsonb
+  p_settings jsonb default '{}'::jsonb,
+  p_profile_name text default null
 ) returns integer
 language plpgsql
 security definer
@@ -152,12 +232,23 @@ begin
     feature_flags = case when v_settings ? 'feature_flags' then excluded.feature_flags else public.profile_settings.feature_flags end;
 
   v_next_revision := v_current_revision + 1;
-  update public.profiles set revision = v_next_revision where id = p_profile_id;
+  update public.profiles
+  set
+    revision = v_next_revision,
+    name = case
+      when p_profile_name is not null
+        and length(btrim(p_profile_name)) between 1 and 120
+        and private.owns_profile(p_profile_id)
+      then btrim(p_profile_name)
+      else name
+    end
+  where id = p_profile_id;
+
   return v_next_revision;
 end;
 $$;
 
-revoke all on function public.publish_profile_snapshot(uuid, integer, jsonb, jsonb, jsonb, jsonb) from public;
-grant execute on function public.publish_profile_snapshot(uuid, integer, jsonb, jsonb, jsonb, jsonb) to authenticated;
+revoke all on function public.publish_profile_snapshot(uuid, integer, jsonb, jsonb, jsonb, jsonb, text) from public;
+grant execute on function public.publish_profile_snapshot(uuid, integer, jsonb, jsonb, jsonb, jsonb, text) to authenticated;
 
 commit;

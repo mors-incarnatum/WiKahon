@@ -56,7 +56,7 @@ export default function BoardGrid({ boardId }: { boardId: string }) {
                                     appearance={s.appearance}
                                     onEdit={() => a.open(c.key, c.sourcePage)}
                                     onMove={
-                                        s.moving && (s.automatic || s.movingPage === c.sourcePage) && edit.state.isEditMode
+                                        s.moving && edit.state.isEditMode
                                             ? () => a.moveTo(c.key, c.sourcePage)
                                             : undefined
                                     }
@@ -67,13 +67,32 @@ export default function BoardGrid({ boardId }: { boardId: string }) {
                 ))}
             </div>
 
-            <div className="board-page-indicator" aria-live="polite">
-                Page {s.page + 1} / {s.pageCount}
+            <div
+                className="board-page-indicator"
+                aria-live="polite"
+                style={
+                    edit.state.isEditMode && !s.automatic
+                        ? { pointerEvents: "auto", display: "inline-flex", alignItems: "center", gap: 8 }
+                        : undefined
+                }
+            >
+                <span>
+                    Page {s.page + 1} / {s.pageCount}
+                </span>
+                {edit.state.isEditMode && !s.automatic && (
+                    <button
+                        type="button"
+                        onClick={a.addPage}
+                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs font-bold text-slate-700"
+                    >
+                        + Add page
+                    </button>
+                )}
             </div>
 
             {s.moving && (
                 <p role="status">
-                    Choose a destination slot{s.automatic ? "" : ` on page ${s.movingPage + 1}`} · Escape to cancel
+                    Choose a destination slot (scroll for other pages) · Escape to cancel
                 </p>
             )}
 

@@ -163,6 +163,7 @@ export class ChatSocketService implements IChatSocketService {
     private oldestHistoryCursor: { createdAt: string; id: string } | null = null;
     private hasMoreHistory = false;
     private loadingOlderGen: number | null = null;
+    private authRetryUnsubscribe: (() => void) | null = null;
 
     constructor(
         private readonly getClient: () => BoardSupabaseClient | null = getSupabaseBrowserClient,
@@ -395,6 +396,7 @@ export class ChatSocketService implements IChatSocketService {
     disconnect(): void {
         ++this.connectionGen;
         this.connectingGen = null;
+        this.clearAuthRetryListener();
         this.oldestHistoryCursor = null;
         this.setHistoryMeta(false, null);
         const channel = this.channel;
@@ -591,11 +593,52 @@ export class ChatSocketService implements IChatSocketService {
         void this.openChannel(client, channelName, context, gen);
     }
 
+    private clearAuthRetryListener(): void {
+        const unsubscribe = this.authRetryUnsubscribe;
+        this.authRetryUnsubscribe = null;
+        unsubscribe?.();
+    }
+
+    private attachAuthRetryListener(
+        client: BoardSupabaseClient,
+        channelName: string,
+        context: ChatBindingContext,
+        gen: number,
+    ): void {
+        this.clearAuthRetryListener();
+        if (!context.userId || typeof client.auth?.onAuthStateChange !== "function") return;
+        if (!this.isActiveAttempt(gen, context)) return;
+
+        const { data } = client.auth.onAuthStateChange((_event, session) => {
+            if (!this.isActiveAttempt(gen, context) || this.channel || this.connectingGen !== null) {
+                if (!this.isActiveAttempt(gen, context) || this.channel) {
+                    this.clearAuthRetryListener();
+                }
+                return;
+            }
+            if (session?.user?.id === context.userId && session.access_token) {
+                this.clearAuthRetryListener();
+                this.connectingGen = gen;
+                this.setStatus("connecting");
+                void this.openChannel(client, channelName, context, gen, true);
+            }
+        });
+        const subscription = data?.subscription;
+        if (subscription && typeof subscription.unsubscribe === "function") {
+            if (!this.isActiveAttempt(gen, context) || this.channel || this.connectingGen !== null) {
+                subscription.unsubscribe();
+                return;
+            }
+            this.authRetryUnsubscribe = () => subscription.unsubscribe();
+        }
+    }
+
     private async openChannel(
         client: BoardSupabaseClient,
         channelName: string,
         context: ChatBindingContext,
         gen: number,
+        fromAuthRetry = false,
     ): Promise<void> {
         let accessToken: string | undefined;
         try {
@@ -606,6 +649,9 @@ export class ChatSocketService implements IChatSocketService {
             if (!this.isActiveAttempt(gen, context)) return;
             this.connectingGen = null;
             this.setStatus("unlinked");
+            if (!fromAuthRetry && this.activeContext && this.channelName) {
+                this.attachAuthRetryListener(client, channelName, context, gen);
+            }
             return;
         }
 
@@ -616,8 +662,13 @@ export class ChatSocketService implements IChatSocketService {
         if (!accessToken || !this.channelName) {
             this.connectingGen = null;
             this.setStatus("unlinked");
+            if (!fromAuthRetry && !accessToken && this.activeContext && this.channelName) {
+                this.attachAuthRetryListener(client, channelName, context, gen);
+            }
             return;
         }
+
+        this.clearAuthRetryListener();
 
         try {
             await client.realtime.setAuth(accessToken);

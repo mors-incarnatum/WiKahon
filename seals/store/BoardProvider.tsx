@@ -13,6 +13,7 @@ import { activeProfileIndexKey, profileStorageKey } from "@/services/storage/loc
 import { accountProfileOwnerId, createBoardStore, type BoardState, type BoardStore } from "./useBoardStore";
 
 const SESSION_CHECK_INTERVAL_MS = 30_000;
+const CLOUD_RESYNC_COOLDOWN_MS = 30_000;
 
 const BoardContext = createContext<BoardStore | null>(null);
 
@@ -20,6 +21,9 @@ export function BoardProvider({ children }: { children: React.ReactNode }) {
     const [store] = useState(() => createBoardStore());
     const [ready, setReady] = useState(false);
     const lastSyncKeyRef = useRef<string | null>(null);
+    const lastCloudSyncAtRef = useRef<number>(0);
+    const syncInFlightRef = useRef<boolean>(false);
+    const syncGenRef = useRef<number>(0);
 
     const userId = useStore(store, s => s.currentUser?.id);
     const activeProfileId = useStore(store, s => s.activeProfileId);
@@ -141,6 +145,9 @@ export function BoardProvider({ children }: { children: React.ReactNode }) {
         if (!userId || userId === LOCAL_CHILD_SESSION.user.id) {
             chatSocketService.setActiveContext(null);
             lastSyncKeyRef.current = null;
+            lastCloudSyncAtRef.current = 0;
+            syncInFlightRef.current = false;
+            ++syncGenRef.current;
             return;
         }
 
@@ -150,37 +157,93 @@ export function BoardProvider({ children }: { children: React.ReactNode }) {
                 : null,
         );
 
-        const syncKey = `${userId}:${cloudProfileId ?? "none"}`;
-        if (lastSyncKeyRef.current === syncKey) return;
-        lastSyncKeyRef.current = syncKey;
-
         let cancelled = false;
-        const { activeProfileId: currentActiveProfileId, cloudRevision, dirty } = store.getState();
-        void cloudSyncService
-            .syncAssignedProfileForCurrentUser(
-                userId,
-                cloudProfileId,
-                cloudRevision,
-                dirty,
-                !dirty && cloudProfileId ? currentActiveProfileId : undefined,
-            )
-            .then(res => {
-                if (res.ok && res.updated && res.doc) {
-                    const latest = store.getState();
-                    if (cancelled || latest.currentUser?.id !== userId || latest.activeProfileId !== currentActiveProfileId
-                        || latest.cloudProfileId !== cloudProfileId || !latest.applySyncedCloudProfile(res.doc)) {
-                        if (res.doc.localProfileId !== currentActiveProfileId) {
-                            return discardPreparedMedia(res.doc.localProfileId);
+        const runSync = (reason: "key" | "background") => {
+            if (cancelled) return;
+            if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+            if (reason === "background") {
+                if (syncInFlightRef.current) return;
+                if (Date.now() - lastCloudSyncAtRef.current < CLOUD_RESYNC_COOLDOWN_MS) return;
+            }
+
+            const latestBefore = store.getState();
+            if (
+                latestBefore.currentUser?.id !== userId ||
+                latestBefore.activeProfileId !== activeProfileId ||
+                latestBefore.cloudProfileId !== cloudProfileId
+            ) {
+                return;
+            }
+
+            const syncGen = ++syncGenRef.current;
+            syncInFlightRef.current = true;
+            lastCloudSyncAtRef.current = Date.now();
+            const { activeProfileId: currentActiveProfileId, cloudRevision, dirty } = latestBefore;
+
+            void cloudSyncService
+                .syncAssignedProfileForCurrentUser(
+                    userId,
+                    cloudProfileId,
+                    cloudRevision,
+                    dirty,
+                    !dirty && cloudProfileId ? currentActiveProfileId : undefined,
+                )
+                .then(res => {
+                    if (res.ok && res.updated && res.doc) {
+                        const latest = store.getState();
+                        if (
+                            cancelled ||
+                            syncGen !== syncGenRef.current ||
+                            latest.currentUser?.id !== userId ||
+                            latest.activeProfileId !== currentActiveProfileId ||
+                            latest.cloudProfileId !== cloudProfileId ||
+                            !latest.applySyncedCloudProfile(res.doc)
+                        ) {
+                            if (res.doc.localProfileId !== currentActiveProfileId) {
+                                return discardPreparedMedia(res.doc.localProfileId);
+                            }
+                            return;
                         }
-                        return;
+                        const after = store.getState();
+                        lastSyncKeyRef.current = `${userId}:${after.activeProfileId}:${after.cloudProfileId ?? "none"}`;
                     }
-                    lastSyncKeyRef.current = `${userId}:${res.doc.cloudProfileId ?? "none"}`;
-                }
-            })
-            .catch(() => undefined);
+                })
+                .catch(() => undefined)
+                .finally(() => {
+                    if (syncGen === syncGenRef.current) {
+                        syncInFlightRef.current = false;
+                    }
+                });
+        };
+
+        const syncKey = `${userId}:${activeProfileId}:${cloudProfileId ?? "none"}`;
+        if (lastSyncKeyRef.current !== syncKey) {
+            lastSyncKeyRef.current = syncKey;
+            runSync("key");
+        }
+
+        const handleFocus = () => runSync("background");
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === "visible") {
+                runSync("background");
+            }
+        };
+        const handleOnline = () => runSync("background");
+        const handleOffline = () => {
+            lastCloudSyncAtRef.current = 0;
+        };
+
+        window.addEventListener("focus", handleFocus);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+        window.addEventListener("online", handleOnline);
+        window.addEventListener("offline", handleOffline);
 
         return () => {
             cancelled = true;
+            window.removeEventListener("focus", handleFocus);
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
+            window.removeEventListener("online", handleOnline);
+            window.removeEventListener("offline", handleOffline);
         };
     }, [ready, userId, activeProfileId, cloudProfileId, store]);
 

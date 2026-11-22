@@ -78,6 +78,12 @@ export const ICONS: IconEntry[] = [
     })),
 ];
 
+export const SPEECH_ICON_NAME = "speech";
+
+export function isSpeechIcon(name: string | null | undefined): boolean {
+    return name === SPEECH_ICON_NAME;
+}
+
 export const iconPath = (name: string | null, animated = false): string | undefined => {
     if (!name) return undefined;
     const entry = ICONS.find(icon => icon.name === name);

@@ -1,6 +1,7 @@
 "use server";
 
 import { headers } from "next/headers";
+import { z } from "zod";
 import type { AuthSession } from "@/models/auth";
 import type { UserRole } from "@/models/user";
 import {
@@ -27,10 +28,38 @@ export interface AuthActionResponse {
 
 const UNIFORM_LOGIN_ERROR = "Invalid email/username or password.";
 const MAX_LOGIN_ATTEMPTS = 10;
+const MAX_SIGNUP_ATTEMPTS = 5;
+const MAX_RESEND_ATTEMPTS = 5;
 const WINDOW_MS = 60_000;
+const MAX_RATE_LIMIT_KEYS = 5_000;
 const loginAttempts = new Map<string, number[]>();
+let lastEvictionAt = 0;
 
-async function isLoginRateLimited(normalizedIdentifier: string): Promise<boolean> {
+const ResendEmailSchema = z.string().trim().toLowerCase().max(254).pipe(z.email());
+
+function pruneRateLimitMap(now: number): void {
+    const windowStart = now - WINDOW_MS;
+    if (now - lastEvictionAt >= WINDOW_MS || loginAttempts.size >= MAX_RATE_LIMIT_KEYS) {
+        lastEvictionAt = now;
+        for (const [entryKey, timestamps] of loginAttempts) {
+            const latest = timestamps[timestamps.length - 1];
+            if (latest === undefined || latest <= windowStart) {
+                loginAttempts.delete(entryKey);
+            }
+        }
+    }
+    while (loginAttempts.size >= MAX_RATE_LIMIT_KEYS) {
+        const oldestKey = loginAttempts.keys().next().value;
+        if (oldestKey === undefined) break;
+        loginAttempts.delete(oldestKey);
+    }
+}
+
+async function isRateLimited(
+    bucket: "login" | "signup" | "resend",
+    normalizedIdentifier: string,
+    maxAttempts: number,
+): Promise<boolean> {
     let clientIp = "unknown";
     try {
         const headerStore = await headers();
@@ -40,12 +69,17 @@ async function isLoginRateLimited(normalizedIdentifier: string): Promise<boolean
         // Ignore when called outside a Next.js request context (e.g., unit tests).
     }
 
-    const key = `${normalizedIdentifier}:${clientIp}`;
     const now = Date.now();
+    pruneRateLimitMap(now);
+
+    const key = `${bucket}:${normalizedIdentifier}:${clientIp}`;
     const windowStart = now - WINDOW_MS;
     const recent = (loginAttempts.get(key) ?? []).filter((ts) => ts > windowStart);
 
-    if (recent.length >= MAX_LOGIN_ATTEMPTS) {
+    // Refresh insertion order so active keys are retained ahead of stale ones during cap eviction.
+    loginAttempts.delete(key);
+
+    if (recent.length >= maxAttempts) {
         loginAttempts.set(key, recent);
         return true;
     }
@@ -70,7 +104,7 @@ export async function loginServerAction(input: {
     }
 
     const normalizedIdentifier = validation.data.identifier.trim().toLowerCase();
-    if (await isLoginRateLimited(normalizedIdentifier)) {
+    if (await isRateLimited("login", normalizedIdentifier, MAX_LOGIN_ATTEMPTS)) {
         return {
             ok: false,
             error: "Too many sign-in attempts. Please wait a minute and try again.",
@@ -89,10 +123,15 @@ export async function loginServerAction(input: {
     if (normalizedIdentifier.includes("@")) {
         email = normalizedIdentifier;
     } else {
-        const username = normalizedIdentifier === "guardian" ? "kyle" : normalizedIdentifier === "child" ? "lily" : normalizedIdentifier;
-        const rpcClient = createSupabaseServiceRoleClient() ?? supabase;
-        const { data: resolvedEmail, error: lookupError } = await rpcClient.rpc("resolve_login_email", {
-            p_identifier: username,
+        const serviceClient = createSupabaseServiceRoleClient();
+        if (!serviceClient) {
+            return {
+                ok: false,
+                error: "Username sign-in requires server configuration. Please sign in using your email address.",
+            };
+        }
+        const { data: resolvedEmail, error: lookupError } = await serviceClient.rpc("resolve_login_email", {
+            p_identifier: normalizedIdentifier,
         });
         if (lookupError || !resolvedEmail) {
             return {
@@ -174,12 +213,38 @@ export async function signupServerAction(input: {
         };
     }
 
+    if (await isRateLimited("signup", validation.data.email, MAX_SIGNUP_ATTEMPTS)) {
+        return {
+            ok: false,
+            error: "Too many sign-up attempts. Please wait a minute and try again.",
+        };
+    }
+
     const supabase = await createSupabaseServerClient();
     if (!supabase) {
         return {
             ok: false,
             error: "Supabase Auth is not configured on this environment.",
         };
+    }
+
+    const serviceClient = createSupabaseServiceRoleClient();
+    if (serviceClient) {
+        const { data: existingAccount } = await serviceClient
+            .from("user_accounts")
+            .select("user_id")
+            .eq("username", validation.data.username)
+            .maybeSingle();
+
+        if (existingAccount) {
+            return {
+                ok: false,
+                error: "That username is already taken.",
+                fieldErrors: {
+                    username: ["That username is already taken."],
+                },
+            };
+        }
     }
 
     const { data, error } = await supabase.auth.signUp({
@@ -230,6 +295,46 @@ export async function signupServerAction(input: {
             accessToken: data.session.access_token,
             refreshToken: data.session.refresh_token,
         },
+    };
+}
+
+/** Server Action: rate-limits and resends a signup confirmation email with anti-enumeration response. */
+export async function resendConfirmationEmailServerAction(email: string): Promise<AuthActionResponse> {
+    const validation = ResendEmailSchema.safeParse(email);
+    if (!validation.success) {
+        return {
+            ok: false,
+            error: "Please enter a valid email address.",
+            fieldErrors: {
+                email: ["Please enter a valid email address."],
+            },
+        };
+    }
+
+    const normalizedEmail = validation.data;
+    if (await isRateLimited("resend", normalizedEmail, MAX_RESEND_ATTEMPTS)) {
+        return {
+            ok: false,
+            error: "Too many confirmation email requests. Please wait a minute and try again.",
+        };
+    }
+
+    const supabase = await createSupabaseServerClient();
+    if (!supabase) {
+        return {
+            ok: false,
+            error: "Supabase Auth is not configured on this environment.",
+        };
+    }
+
+    await supabase.auth.resend({
+        type: "signup",
+        email: normalizedEmail,
+    });
+
+    return {
+        ok: true,
+        message: "If an unconfirmed account exists for that email, a new confirmation link has been sent.",
     };
 }
 

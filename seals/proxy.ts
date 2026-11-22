@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import type { Database } from "@/models/supabase/database.types";
 
 const SESSION_COOKIE_NAME = "wikahon_session";
+const PUBLIC_AUTH_PATHS = new Set(["/login", "/register", "/forgot-password"]);
 
 /** Refreshes Supabase Auth session cookies without blocking or redirecting /board offline routes. */
 export async function proxy(request: NextRequest) {
@@ -12,8 +13,12 @@ export async function proxy(request: NextRequest) {
 
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    const isPublicAuthPage = PUBLIC_AUTH_PATHS.has(request.nextUrl.pathname);
+    const hasSupabaseAuthCookie = request.cookies
+        .getAll()
+        .some((cookie) => cookie.name.startsWith("sb-"));
 
-    if (url && key) {
+    if (url && key && !(isPublicAuthPage && !hasSupabaseAuthCookie)) {
         const supabase = createServerClient<Database>(url, key, {
             cookies: {
                 getAll() {

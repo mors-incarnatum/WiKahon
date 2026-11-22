@@ -16,6 +16,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 5. Do not make tests
 6. Make use of Supabase skills
 7. Each listed implementation task will automatically be assigned to a subagent: For Gemini use Hydrogen High, Codex Equivalent will use Terra High.
+8. Supabase SQL files will remain in the default location, which is not inside models folder
 <!-- END:project-rules -->
 
 <!-- BEGIN:project-architecture -->

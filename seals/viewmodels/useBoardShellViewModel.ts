@@ -1,9 +1,11 @@
 "use client";
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { isGuardianRole } from "@/models/auth";
+import { isGuardianRole, LOCAL_CHILD_SESSION } from "@/models/auth";
 import type { Tile } from "@/lib/board";
 import { chatSocketService } from "@/services/chat/chatSocketService";
+import { cloudSyncService } from "@/services/cloud/cloudSyncService";
+import { discardPreparedMedia } from "@/services/storage/mediaRepository";
 import { useBoardStore, useBoardStoreApi } from "@/store/BoardProvider";
 import {
     chatReadScopeKey,
@@ -14,8 +16,8 @@ import {
 import { useSentenceViewModel } from "./useSentenceViewModel";
 import { useEditModeViewModel } from "./useEditModeViewModel";
 
-export type ShellPanel = "settings" | "catalogs" | "layout" | "scribble" | "chat" | null;
-type LocalPanel = "settings" | "catalogs" | "layout" | null;
+export type ShellPanel = "settings" | "profiles" | "catalogs" | "layout" | "scribble" | "chat" | null;
+type LocalPanel = "settings" | "profiles" | "catalogs" | "layout" | null;
 
 const DEFAULT_PINNED_TILE_IDS = ["n-5", "n-3", "n-1", "p-4", "f-1"] as const;
 
@@ -64,11 +66,19 @@ export function useBoardShellViewModel() {
         userId: null,
         panel: null,
     });
+    const [syncingCloud, setSyncingCloud] = useState(false);
+    const [syncStatus, setSyncStatus] = useState<string | null>(null);
     const [wheelState, setWheelState] = useState<{
         userId: string;
         coords: { x: number; y: number };
     } | null>(null);
     const lastBoardPathRef = useRef(pathname.startsWith("/board") ? pathname : "/board");
+
+    useEffect(() => {
+        if (!syncStatus) return;
+        const timer = window.setTimeout(() => setSyncStatus(null), 4000);
+        return () => window.clearTimeout(timer);
+    }, [syncStatus]);
 
     useEffect(() => {
         if (pathname.startsWith("/board")) {
@@ -102,7 +112,8 @@ export function useBoardShellViewModel() {
     const wheel = currentUser && wheelState?.userId === currentUser.id ? wheelState.coords : null;
 
     const gatedLocalPanel: LocalPanel =
-        !isGuardian && (localPanel === "settings" || localPanel === "catalogs" || localPanel === "layout")
+        !isGuardian &&
+        (localPanel === "settings" || localPanel === "profiles" || localPanel === "catalogs" || localPanel === "layout")
             ? null
             : localPanel;
     const activePanel: ShellPanel = gatedLocalPanel ?? routePanel;
@@ -148,7 +159,12 @@ export function useBoardShellViewModel() {
     }, [chatEnabled, storeApi, boundUserId, boundLocalProfileId, boundCloudProfileId]);
 
     const setPanel = (next: ShellPanel) => {
-        if (!isGuardian && (next === "settings" || next === "catalogs" || next === "layout")) return;
+        if (
+            !isGuardian &&
+            (next === "settings" || next === "profiles" || next === "catalogs" || next === "layout")
+        ) {
+            return;
+        }
         if (next === "chat") {
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
             if (pathname !== "/chat") {
@@ -188,9 +204,57 @@ export function useBoardShellViewModel() {
     const toggleChat = () => (pathname === "/chat" ? router.push(lastBoardPathRef.current || "/board") : setPanel("chat"));
     const toggleScribble = () => (pathname === "/scribble" ? router.push(lastBoardPathRef.current || "/board") : setPanel("scribble"));
 
+    const canSyncCloud = Boolean(
+        currentUser &&
+        currentUser.id !== LOCAL_CHILD_SESSION.user.id &&
+        cloudSyncService.isConfigured(),
+    );
+
+    const syncCloudNow = async () => {
+        if (!canSyncCloud || !currentUser || syncingCloud) return;
+        const snapshot = storeApi.getState();
+        const userId = currentUser.id;
+        const targetLocalProfileId = snapshot.activeProfileId;
+        const targetCloudProfileId = snapshot.cloudProfileId;
+        setSyncingCloud(true);
+        setSyncStatus(null);
+        try {
+            const res = await cloudSyncService.syncAssignedProfileForCurrentUser(
+                userId,
+                targetCloudProfileId,
+                snapshot.cloudRevision,
+                snapshot.dirty,
+                !snapshot.dirty && targetCloudProfileId ? targetLocalProfileId : undefined,
+            );
+            const latest = storeApi.getState();
+            if (res.ok && res.updated && res.doc) {
+                const sameTarget =
+                    latest.currentUser?.id === userId &&
+                    latest.activeProfileId === targetLocalProfileId &&
+                    latest.cloudProfileId === targetCloudProfileId;
+                if (sameTarget && latest.applySyncedCloudProfile(res.doc)) {
+                    setSyncStatus("Synced from cloud");
+                } else if (res.doc.localProfileId !== latest.activeProfileId) {
+                    await discardPreparedMedia(res.doc.localProfileId);
+                }
+            } else if (res.ok && res.conflictProfile) {
+                setSyncStatus("Newer cloud version available in Settings → Profiles.");
+            } else if (res.ok) {
+                setSyncStatus("Board is up to date");
+            } else {
+                setSyncStatus(res.error ?? "Cloud sync failed.");
+            }
+        } catch {
+            setSyncStatus("Cloud sync failed.");
+        } finally {
+            setSyncingCloud(false);
+        }
+    };
+
     const logout = () => {
         setLocalPanelState({ userId: null, panel: null });
         setWheelState(null);
+        setSyncStatus(null);
         edit.actions.lock();
         storeLogout();
         router.replace("/login");
@@ -215,6 +279,9 @@ export function useBoardShellViewModel() {
             storageStatus,
             storageError,
             dirty,
+            canSyncCloud,
+            syncingCloud,
+            syncStatus,
             featureFlags,
             wheelEnabled,
             pinnedTiles,
@@ -226,6 +293,8 @@ export function useBoardShellViewModel() {
             setPanel,
             toggleChat,
             toggleScribble,
+            syncCloudNow,
+            clearSyncStatus: () => setSyncStatus(null),
             logout,
             closeWheel: () => setWheelState(null),
             openCatalogs: () => {

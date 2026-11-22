@@ -1,49 +1,37 @@
-import { DEFAULT_GRID, type BoardPage, type CatalogBoard, type ColorKey, type GridConfig, type LanguageTag, type Tile } from "@/lib/board";
+import {
+    COLOR_SYSTEMS,
+    type BoardPage,
+    type CatalogBoard,
+    type ColorSystemId,
+    type GridConfig,
+    type LanguageTag,
+    type Tile,
+} from "@/lib/board";
 import { readColorSystem, sanitizeInactiveCatalogLayouts } from "@/lib/boardDefaults";
+import { COLOR_KEYS, LANGUAGE_TAGS, WORD_CLASSES } from "@/lib/boardSchemas";
 import { DEFAULT_FEATURE_FLAGS, isValidMediaId, type BoardData, type FeatureFlags } from "../boardData";
-import type { Word } from "../word";
-import type { BoardRow, Insert, Json, ProfileSettingsRow, TileRow, WordRow } from "./database.types";
+import type { BoardRow, Insert, Json, ProfileSettingsRow, TileRow } from "./database.types";
 
-export type CloudSettings = Pick<BoardData, "catalogOrder" | "colorSystem" | "inactiveCatalogLayouts" | "gridConfig" | "layoutMode" | "tileAppearance" | "speechConfig"> & {
+export interface BoardEntry {
+    board: CatalogBoard;
+    catalogSystem: ColorSystemId | null;
+}
+
+export interface CompactInactiveCatalogLayout {
+    home: CatalogBoard;
+    catalogOrder: string[];
+}
+
+export type CompactInactiveCatalogLayouts = Partial<Record<ColorSystemId, CompactInactiveCatalogLayout>>;
+
+export type CloudSettings = Pick<
+    BoardData,
+    "catalogOrder" | "colorSystem" | "gridConfig" | "layoutMode" | "tileAppearance" | "speechConfig"
+> & {
+    inactiveCatalogLayouts?: CompactInactiveCatalogLayouts;
     accessConfig: BoardData["accessConfig"];
     featureFlags?: FeatureFlags;
-    colorOverrides?: {
-        boards: Record<string, ExtendedColor>;
-        tiles: Record<string, ExtendedColor>;
-    };
 };
-
-const BOARD_COLORS = ["rose", "emerald", "amber", "blue", "violet", "teal", "orange", "pink", "slate"] as const;
-type ExtendedColor = Extract<ColorKey, "yellow" | "white">;
-
-function cloudColor(color: ColorKey): BoardRow["color_key"] {
-    if (color === "yellow") return "amber";
-    if (color === "white") return "slate";
-    return color;
-}
-
-function readColorOverrides(value: unknown): CloudSettings["colorOverrides"] {
-    if (!object(value)) return undefined;
-    const read = (entries: unknown): Record<string, ExtendedColor> =>
-        object(entries)
-            ? Object.fromEntries(Object.entries(entries).filter(
-                (entry): entry is [string, ExtendedColor] => entry[1] === "yellow" || entry[1] === "white",
-            ))
-            : {};
-    return { boards: read(value.boards), tiles: read(value.tiles) };
-}
-
-const WORD_CLASSES = [
-    "social",
-    "question",
-    "verb",
-    "pronoun",
-    "particle",
-    "modifier",
-    "place",
-    "noun",
-    "other",
-] as const;
 
 function object(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -66,9 +54,7 @@ function tileDimension(value: unknown): number {
 function grid(value: unknown): GridConfig {
     requireValid(
         object(value) &&
-            [value.rows, value.cols].every(n => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 16) &&
-            (value.layoutMode === undefined || oneOf(value.layoutMode, ["manual", "automatic"])) &&
-            (value.inheritGrid === undefined || typeof value.inheritGrid === "boolean"),
+            [value.rows, value.cols].every(n => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 16),
         "grid",
     );
     return { rows: value.rows as number, cols: value.cols as number };
@@ -95,52 +81,52 @@ function json(value: unknown): Json {
     return JSON.parse(JSON.stringify(value)) as Json;
 }
 
-export function tileToWord(tile: Tile): Word {
-    requireValid(tile.kind === "word", "word tile");
-    return {
-        id: tile.id,
-        label: tile.label,
-        iconName: tile.iconName,
-        categoryId: tile.categoryId,
-        ...(tile.spokenText !== undefined ? { spokenText: tile.spokenText } : {}),
-        ...(tile.mediaId !== undefined ? { mediaId: tile.mediaId } : {}),
-        ...(tile.language !== undefined ? { language: tile.language } : {}),
-        ...(tile.colorKey !== undefined ? { colorKey: tile.colorKey } : {}),
-        ...(tile.wordClass !== undefined ? { wordClass: tile.wordClass } : {}),
-        ...(tile.isCustom !== undefined ? { isCustom: tile.isCustom } : {}),
-        ...(tile.isQuickPhrase !== undefined ? { isQuickPhrase: tile.isQuickPhrase } : {}),
-    };
+function sanitizeCompactInactiveCatalogLayouts(raw: unknown): CompactInactiveCatalogLayouts {
+    if (!object(raw)) return {};
+    const layouts: CompactInactiveCatalogLayouts = {};
+    for (const system of Object.keys(COLOR_SYSTEMS) as ColorSystemId[]) {
+        const entry = raw[system];
+        if (!object(entry) || !object(entry.home) || !Array.isArray(entry.catalogOrder)) continue;
+        const sanitized = sanitizeInactiveCatalogLayouts({
+            [system]: { boards: { home: entry.home }, catalogOrder: [] },
+        });
+        const home = sanitized?.[system]?.boards.home;
+        if (!home) continue;
+        layouts[system] = {
+            home,
+            catalogOrder: entry.catalogOrder.filter(
+                (id): id is string => typeof id === "string" && id.length > 0 && id !== "home",
+            ),
+        };
+    }
+    return layouts;
 }
 
-export function wordToTile(word: Word): Tile {
-    return { ...word, kind: "word" };
-}
-
-export function boardToRow(profileId: string, board: CatalogBoard): Insert<"boards"> {
+export function boardToRow(
+    profileId: string,
+    board: CatalogBoard,
+    catalogSystem: ColorSystemId | null = null,
+): Insert<"boards"> {
     requireValid(
         board.layoutModeOverride === undefined || oneOf(board.layoutModeOverride, ["manual", "automatic"]),
         "board layoutModeOverride",
     );
-    // The existing grid constraint requires dimensions even for mode-only overrides.
-    const gridOverride = board.layoutModeOverride
-        ? {
-              ...grid(board.gridOverride ?? DEFAULT_GRID),
-              layoutMode: board.layoutModeOverride,
-              ...(board.gridOverride ? {} : { inheritGrid: true }),
-          }
-        : board.gridOverride && grid(board.gridOverride);
+    requireValid(catalogSystem === null || Object.hasOwn(COLOR_SYSTEMS, catalogSystem), "board catalogSystem");
+    const gridOverride = board.gridOverride ? grid(board.gridOverride) : null;
     const row: Insert<"boards"> = {
         profile_id: profileId,
         id: board.id,
         name: board.name,
         short_name: board.shortName,
-        color_key: cloudColor(board.colorKey),
+        color_key: board.colorKey,
         icon_name: board.iconName,
         is_built_in: board.isBuiltIn,
         grid_override: gridOverride ? json(gridOverride) : null,
+        layout_mode_override: board.layoutModeOverride ?? null,
+        catalog_system: catalogSystem,
         pages: json(pages(board.pages)),
     };
-    boardFromRow(row as BoardRow);
+    boardEntryFromRow(row as BoardRow);
     return row;
 }
 
@@ -148,12 +134,16 @@ export function boardFromRow(row: BoardRow): CatalogBoard {
     requireValid(typeof row.id === "string" && row.id.length > 0, "board id");
     requireValid(typeof row.name === "string" && row.name.trim().length > 0, "board name");
     requireValid(typeof row.short_name === "string", "board short_name");
-    requireValid(oneOf(row.color_key, BOARD_COLORS), "board color_key");
+    requireValid(oneOf(row.color_key, COLOR_KEYS), "board color_key");
     requireValid(typeof row.is_built_in === "boolean", "board is_built_in");
-    const rawGrid = row.grid_override;
-    const parsedGrid = rawGrid === null ? undefined : grid(rawGrid);
-    const modeOverride = object(rawGrid) ? layoutMode(rawGrid.layoutMode) : undefined;
-    const inheritGrid = modeOverride !== undefined && object(rawGrid) && rawGrid.inheritGrid === true;
+    requireValid(
+        row.layout_mode_override === null ||
+            row.layout_mode_override === undefined ||
+            oneOf(row.layout_mode_override, ["manual", "automatic"]),
+        "board layout_mode_override",
+    );
+    const parsedGrid = row.grid_override === null ? undefined : grid(row.grid_override);
+    const modeOverride = layoutMode(row.layout_mode_override);
     return {
         id: row.id,
         name: row.name,
@@ -161,9 +151,22 @@ export function boardFromRow(row: BoardRow): CatalogBoard {
         colorKey: row.color_key,
         iconName: row.icon_name,
         isBuiltIn: row.is_built_in,
-        ...(parsedGrid && !inheritGrid ? { gridOverride: parsedGrid } : {}),
+        ...(parsedGrid ? { gridOverride: parsedGrid } : {}),
         ...(modeOverride ? { layoutModeOverride: modeOverride } : {}),
         pages: pages(row.pages),
+    };
+}
+
+export function boardEntryFromRow(row: BoardRow): BoardEntry {
+    requireValid(
+        row.catalog_system === null ||
+            row.catalog_system === undefined ||
+            Object.hasOwn(COLOR_SYSTEMS, row.catalog_system),
+        "board catalog_system",
+    );
+    return {
+        board: boardFromRow(row),
+        catalogSystem: row.catalog_system ?? null,
     };
 }
 
@@ -176,12 +179,12 @@ export function tileToRow(profileId: string, tile: Tile): Insert<"tiles"> {
         spoken_text: tile.spokenText ?? null,
         icon_name: tile.iconName,
         media_id: tile.mediaId ?? null,
-        language: tile.language ?? "fil",
+        language: parseLanguageTag(tile.language),
         is_quick_phrase: tile.isQuickPhrase ?? false,
         category_id: tile.categoryId,
         // The editor may convert a folder to a word while retaining optional fields.
         target_board_id: tile.kind === "folder" ? (tile.targetBoardId ?? null) : null,
-        color_key: tile.colorKey ? cloudColor(tile.colorKey) : null,
+        color_key: tile.colorKey ?? null,
         word_class: tile.wordClass ?? null,
         is_custom: tile.isCustom ?? false,
     };
@@ -199,7 +202,8 @@ export function tileFromRow(row: TileRow): Tile {
         "tile target_board_id",
     );
     requireValid(row.media_id === null || isValidMediaId(row.media_id), "media_id");
-    requireValid(row.color_key === null || oneOf(row.color_key, BOARD_COLORS), "tile color_key");
+    requireValid(oneOf(row.language, LANGUAGE_TAGS), "tile language");
+    requireValid(row.color_key === null || oneOf(row.color_key, COLOR_KEYS), "tile color_key");
     requireValid(row.word_class === null || oneOf(row.word_class, WORD_CLASSES), "tile word_class");
     return {
         id: row.id,
@@ -208,52 +212,11 @@ export function tileFromRow(row: TileRow): Tile {
         iconName: row.icon_name,
         categoryId: row.category_id,
         isCustom: row.is_custom,
+        language: parseLanguageTag(row.language),
         ...(row.spoken_text === null ? {} : { spokenText: row.spoken_text }),
         ...(row.media_id ? { mediaId: row.media_id } : {}),
-        ...(row.language ? { language: parseLanguageTag(row.language) } : {}),
         ...(row.is_quick_phrase ? { isQuickPhrase: row.is_quick_phrase } : {}),
         ...(row.target_board_id === null ? {} : { targetBoardId: row.target_board_id }),
-        ...(row.color_key === null ? {} : { colorKey: row.color_key }),
-        ...(row.word_class === null ? {} : { wordClass: row.word_class }),
-    };
-}
-
-export function wordToRow(profileId: string, word: Word): Insert<"words"> {
-    const row: Insert<"words"> = {
-        profile_id: profileId,
-        id: word.id,
-        label: word.label,
-        spoken_text: word.spokenText ?? null,
-        icon_name: word.iconName,
-        media_id: word.mediaId ?? null,
-        language: word.language ?? "fil",
-        category_id: word.categoryId,
-        color_key: word.colorKey ? cloudColor(word.colorKey) : null,
-        word_class: word.wordClass ?? null,
-        is_custom: word.isCustom ?? false,
-        is_quick_phrase: word.isQuickPhrase ?? false,
-    };
-    wordFromRow(row as WordRow);
-    return row;
-}
-
-export function wordFromRow(row: WordRow): Word {
-    requireValid(typeof row.id === "string" && row.id.length > 0, "word id");
-    requireValid(typeof row.label === "string" && row.label.trim().length > 0, "word label");
-    requireValid(typeof row.category_id === "string" && row.category_id.length > 0, "word category_id");
-    requireValid(row.media_id === null || isValidMediaId(row.media_id), "media_id");
-    requireValid(row.color_key === null || oneOf(row.color_key, BOARD_COLORS), "word color_key");
-    requireValid(row.word_class === null || oneOf(row.word_class, WORD_CLASSES), "word word_class");
-    return {
-        id: row.id,
-        label: row.label,
-        iconName: row.icon_name,
-        categoryId: row.category_id,
-        isCustom: row.is_custom,
-        ...(row.spoken_text === null ? {} : { spokenText: row.spoken_text }),
-        ...(row.media_id ? { mediaId: row.media_id } : {}),
-        ...(row.language ? { language: parseLanguageTag(row.language) } : {}),
-        ...(row.is_quick_phrase ? { isQuickPhrase: row.is_quick_phrase } : {}),
         ...(row.color_key === null ? {} : { colorKey: row.color_key }),
         ...(row.word_class === null ? {} : { wordClass: row.word_class }),
     };
@@ -301,6 +264,19 @@ export function settingsFromRow(row: ProfileSettingsRow): CloudSettings {
         Array.isArray(row.catalog_order) && row.catalog_order.every(id => typeof id === "string"),
         "catalog order",
     );
+    requireValid(Object.hasOwn(COLOR_SYSTEMS, row.color_system), "color system");
+    requireValid(oneOf(row.layout_mode, ["manual", "automatic"]), "layout mode");
+    requireValid(object(row.inactive_catalog_layouts), "inactive catalog layouts");
+    for (const [system, entry] of Object.entries(row.inactive_catalog_layouts)) {
+        requireValid(
+            Object.hasOwn(COLOR_SYSTEMS, system) &&
+                object(entry) &&
+                object(entry.home) &&
+                Array.isArray(entry.catalogOrder) &&
+                entry.catalogOrder.every(id => typeof id === "string"),
+            "inactive catalog layout",
+        );
+    }
     requireValid(
         object(row.feature_flags) && Object.values(row.feature_flags).every(v => typeof v === "boolean"),
         "feature flags",
@@ -312,14 +288,12 @@ export function settingsFromRow(row: ProfileSettingsRow): CloudSettings {
             featureFlags[key] = rawFlags[key] as boolean;
         }
     }
-    const rawGrid = row.grid_config;
     return {
         catalogOrder: [...row.catalog_order],
-        colorSystem: readColorSystem(a.colorSystem),
-        inactiveCatalogLayouts: sanitizeInactiveCatalogLayouts(a.inactiveCatalogLayouts),
-        colorOverrides: readColorOverrides(a.colorOverrides),
-        gridConfig: grid(rawGrid),
-        layoutMode: (object(rawGrid) && layoutMode(rawGrid.layoutMode)) || "manual",
+        colorSystem: readColorSystem(row.color_system),
+        inactiveCatalogLayouts: sanitizeCompactInactiveCatalogLayouts(row.inactive_catalog_layouts),
+        gridConfig: grid(row.grid_config),
+        layoutMode: layoutMode(row.layout_mode) ?? "manual",
         tileAppearance: {
             labelPosition: a.labelPosition as BoardData["tileAppearance"]["labelPosition"],
             fontScale: a.fontScale as BoardData["tileAppearance"]["fontScale"],
@@ -367,10 +341,10 @@ export function settingsToRow(profileId: string, data: CloudSettings): Insert<"p
     const row: Insert<"profile_settings"> = {
         profile_id: profileId,
         catalog_order: [...data.catalogOrder],
-        grid_config: json({
-            ...grid(data.gridConfig),
-            ...(data.layoutMode !== undefined ? { layoutMode: data.layoutMode } : {}),
-        }),
+        color_system: readColorSystem(data.colorSystem),
+        layout_mode: data.layoutMode === "automatic" ? "automatic" : "manual",
+        inactive_catalog_layouts: json(sanitizeCompactInactiveCatalogLayouts(data.inactiveCatalogLayouts)),
+        grid_config: json(grid(data.gridConfig)),
         tile_appearance: json({
             labelPosition: data.tileAppearance.labelPosition,
             fontScale: data.tileAppearance.fontScale,
@@ -378,9 +352,6 @@ export function settingsToRow(profileId: string, data: CloudSettings): Insert<"p
             showIcons: data.tileAppearance.showIcons,
             gridGap: data.tileAppearance.gridGap,
             colorMode: data.tileAppearance.colorMode,
-            colorSystem: data.colorSystem,
-            inactiveCatalogLayouts: data.inactiveCatalogLayouts,
-            colorOverrides: data.colorOverrides,
             tileWidth: tileDimension(data.tileAppearance.tileWidth),
             tileHeight: tileDimension(data.tileAppearance.tileHeight),
         }),

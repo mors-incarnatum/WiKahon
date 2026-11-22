@@ -11,8 +11,8 @@ export interface ProvisionedChildAccount {
     userId: string;
     username: string;
     name: string;
-    profileId: string;
-    profileName: string;
+    profileId: string | null;
+    profileName: string | null;
 }
 
 /** Built-in offline AAC session used when continuing as Child without cloud sign-in. */
