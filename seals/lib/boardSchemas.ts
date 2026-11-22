@@ -73,6 +73,7 @@ export const SentenceTokenSchema = z.object({
     mediaId: MediaIdSchema.nullable().optional(),
     colorKey: ColorKeySchema,
     wordClass: WordClassSchema.optional(),
+    displayColorKey: ColorKeySchema.optional(),
 });
 
 export const TileAppearanceSchema = z.object({

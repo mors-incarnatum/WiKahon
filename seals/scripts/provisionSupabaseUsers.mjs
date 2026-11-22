@@ -109,6 +109,7 @@ async function ensureAuthUser(supabase, existingUser, spec) {
         role: spec.role,
         username: spec.username,
         name: spec.name,
+        ...(spec.guardianId ? { guardian_id: spec.guardianId } : {}),
     };
     const userMetadata = {
         ...(existingUser?.user_metadata ?? {}),
@@ -145,13 +146,16 @@ async function ensureAuthUser(supabase, existingUser, spec) {
 }
 
 async function upsertUserAccount(supabase, userId, spec) {
+    const payload = {
+        user_id: userId,
+        username: spec.username,
+        display_name: spec.name,
+        role: spec.role,
+        ...(spec.guardianId ? { guardian_id: spec.guardianId } : {}),
+    };
+
     const { error } = await supabase.from("user_accounts").upsert(
-        {
-            user_id: userId,
-            username: spec.username,
-            display_name: spec.name,
-            role: spec.role,
-        },
+        payload,
         { onConflict: "user_id" },
     );
 
@@ -250,15 +254,16 @@ async function main() {
         existingByEmail.get(config.kyle.email.toLowerCase()),
         config.kyle,
     );
+    const lilySpec = { ...config.lily, guardianId: kyleUser.id };
     const lilyUser = await ensureAuthUser(
         supabase,
         existingByEmail.get(config.lily.email.toLowerCase()),
-        config.lily,
+        lilySpec,
     );
 
     await Promise.all([
         upsertUserAccount(supabase, kyleUser.id, config.kyle),
-        upsertUserAccount(supabase, lilyUser.id, config.lily),
+        upsertUserAccount(supabase, lilyUser.id, lilySpec),
     ]);
 
     const profile = await ensureDefaultProfile(supabase, kyleUser.id, config.defaultProfileId);

@@ -3,24 +3,26 @@ import { useRef } from "react";
 import { useSentenceContext } from "@/viewmodels/useBoardShellViewModel";
 import { useMediaUrl } from "@/viewmodels/useMediaUrl";
 /* eslint-disable @next/next/no-img-element */
-import { resolveTokenColor, type SentenceToken, type ColorMode } from "@/lib/board";
+import { resolveTokenColor, type SentenceToken, type ColorMode, type ColorSystemId } from "@/lib/board";
 import { palette } from "@/app/theme";
 
 function TokenButton({
     token,
     index,
     colorMode,
+    colorSystem,
     buttonRef,
     onRemove,
 }: {
     token: SentenceToken;
     index: number;
     colorMode: ColorMode;
+    colorSystem: ColorSystemId;
     buttonRef: (el: HTMLButtonElement | null) => void;
     onRemove: () => void;
 }) {
     const { src } = useMediaUrl(token.iconName, token.mediaId);
-    const color = resolveTokenColor(token, colorMode);
+    const color = resolveTokenColor(token, colorMode, colorSystem);
     return (
         <button
             ref={buttonRef}
@@ -29,7 +31,8 @@ function TokenButton({
             onClick={onRemove}
             aria-label={`Remove ${token.label} at position ${index + 1}`}
         >
-            {src && <img src={src} alt="" />}
+            {token.iconName === "speech" && !token.mediaId && <span aria-hidden="true">💬</span>}
+            {src && <img src={src} alt="" width={30} height={30} />}
             {token.label}
         </button>
     );
@@ -115,6 +118,7 @@ export default function SentenceStrip() {
                         token={t}
                         index={i}
                         colorMode={s.colorMode}
+                        colorSystem={s.colorSystem}
                         buttonRef={el => {
                             tokenRefs.current[i] = el;
                         }}
@@ -123,14 +127,16 @@ export default function SentenceStrip() {
                 ))}
             </div>
             <div className="sentence-actions" style={{ gap: 6 }}>
-                <button type="button" className="primary" style={actionButtonStyle} disabled={s.isEmpty} onClick={a.speakAll} aria-label="Speak sentence" title="Speak sentence">
-                    <SentenceIcon name="speak" />
+                <button
+                    type="button"
+                    className="primary sentence-speak"
+                    disabled={!s.isSpeaking && s.isEmpty}
+                    onClick={s.isSpeaking ? a.stopSpeaking : a.speakAll}
+                    aria-label={s.isSpeaking ? "Stop speaking" : "Speak sentence"}
+                >
+                    <SentenceIcon name={s.isSpeaking ? "stop" : "speak"} />
+                    {s.isSpeaking ? "Stop" : "Speak"}
                 </button>
-                {s.isSpeaking && (
-                    <button type="button" style={actionButtonStyle} onClick={a.stopSpeaking} aria-label="Stop speaking" title="Stop speaking">
-                        <SentenceIcon name="stop" />
-                    </button>
-                )}
                 <button
                     type="button"
                     style={actionButtonStyle}

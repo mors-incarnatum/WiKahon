@@ -201,6 +201,7 @@ export interface SentenceToken {
     mediaId?: string | null;
     colorKey: ColorKey;
     wordClass?: WordClass;
+    displayColorKey?: ColorKey;
 }
 
 export const DEFAULT_GRID: GridConfig = { rows: 5, cols: 4 };
@@ -264,10 +265,12 @@ export function resolveBoardTileColor(
 }
 
 export function resolveTokenColor(
-    token: Pick<SentenceToken, "colorKey" | "wordClass">,
+    token: Pick<SentenceToken, "colorKey" | "wordClass" | "displayColorKey">,
     colorMode: ColorMode,
+    colorSystem: ColorSystemId = "custom",
 ): ColorKey {
     if (colorMode === "neutral") return "slate";
+    if (colorSystem !== "custom" && token.displayColorKey) return token.displayColorKey;
     if (colorMode === "wordClass") {
         return token.wordClass ? WORD_COLORS[token.wordClass] : WORD_COLORS.other;
     }

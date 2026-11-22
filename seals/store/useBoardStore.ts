@@ -85,7 +85,7 @@ export interface BoardState extends BoardData {
     // Hydration & profile commands (W01)
     hydrateFromStorage: (service?: LocalProfileService) => Promise<void>;
     reloadLocalProfiles: () => void;
-    applySyncedCloudProfile: (doc: LocalProfileDocument, service?: LocalProfileService) => boolean;
+    applySyncedCloudProfile: (doc: LocalProfileDocument, service?: LocalProfileService) => Promise<boolean>;
     switchProfile: (localProfileId: string, service?: LocalProfileService) => void;
     createProfile: (name: string, boardData?: BoardData, service?: LocalProfileService) => string;
     renameProfile: (localProfileId: string, name: string, service?: LocalProfileService) => void;
@@ -315,6 +315,21 @@ export function isMediaReferenced(data: BoardData, mediaId: string, excludeTileI
         }
     }
     return false;
+}
+
+function collectReferencedMediaIds(data: BoardData): Set<string> {
+    const referencedIds = new Set<string>();
+    for (const tile of Object.values(data.tiles)) {
+        if (typeof tile.mediaId === "string" && tile.mediaId.length > 0) {
+            referencedIds.add(tile.mediaId);
+        }
+    }
+    for (const token of data.sentence) {
+        if (typeof token.mediaId === "string" && token.mediaId.length > 0) {
+            referencedIds.add(token.mediaId);
+        }
+    }
+    return referencedIds;
 }
 
 function pushSentenceHistory(history: SentenceToken[][], current: SentenceToken[]): SentenceToken[][] {
@@ -869,7 +884,7 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 loadProfilesForUser(s.currentUser, s.authSessionExpiresAt);
             },
 
-            applySyncedCloudProfile: (doc, svc = profileService) => {
+            applySyncedCloudProfile: async (doc, svc = profileService) => {
                 if (persistenceBlocked) return false;
                 const s = get();
                 const targetOwnerId = accountProfileOwnerId(s.currentUser);
@@ -900,12 +915,11 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     ? `profile-${uid()}`
                     : doc.localProfileId;
                 const targetLocalProfileId = updateInPlaceId ?? fallbackNewId;
-                const keepCurrentActive = updateInPlaceId === null && s.dirty;
                 const copyName =
                     updateInPlaceId === null && existingSummary
                         ? `${doc.name} (Cloud rev ${doc.cloudRevision ?? 1})`
                         : doc.name;
-                const sanitizedDoc: LocalProfileDocument = {
+                const buildSanitizedDoc = (inPlaceBoardData: BoardData | null): LocalProfileDocument => ({
                     ...doc,
                     schemaVersion: PROFILE_SCHEMA_VERSION,
                     localProfileId: targetLocalProfileId,
@@ -920,14 +934,144 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                         ...(updateInPlaceId !== null
                             ? {
                                   experimentalData:
-                                      doc.boardData.experimentalData ?? existingBoardData?.experimentalData,
-                                  sentence: existingBoardData?.sentence ?? [],
+                                      doc.boardData.experimentalData ?? inPlaceBoardData?.experimentalData,
+                                  sentence: inPlaceBoardData?.sentence ?? [],
                               }
                             : {}),
                     },
+                });
+                let sanitizedDoc = buildSanitizedDoc(existingBoardData);
+
+                const newlyAddedMediaIds = new Set<string>();
+                const rollbackMigratedMedia = async () => {
+                    if (newlyAddedMediaIds.size === 0) return;
+                    await Promise.all(
+                        Array.from(newlyAddedMediaIds).map(mediaId =>
+                            mediaRepository.removeMedia(targetLocalProfileId, mediaId),
+                        ),
+                    ).catch(() => undefined);
                 };
+
+                if (doc.localProfileId !== targetLocalProfileId) {
+                    const failMediaMigration = async (message: string) => {
+                        await rollbackMigratedMedia();
+                        set({
+                            storageStatus: /quota/i.test(message) ? "quota-exceeded" : "unavailable",
+                            storageError: message,
+                        });
+                        return false;
+                    };
+
+                    try {
+                        const existingTargetRecords = await mediaRepository.listProfileMedia(targetLocalProfileId);
+                        const existingTargetMediaIds = new Set(existingTargetRecords.map(r => r.mediaId));
+                        const sourceRecords = await mediaRepository.listProfileMedia(doc.localProfileId);
+                        const copiedMediaIds = new Set<string>();
+
+                        const copyRecordToTarget = async (record: {
+                            mediaId: string;
+                            blob: Blob;
+                            mimeType: string;
+                            width: number;
+                            height: number;
+                            checksum?: string;
+                        }): Promise<{ ok: true } | { ok: false; error: string }> => {
+                            const saved = await mediaRepository.saveMedia(
+                                targetLocalProfileId,
+                                record.mediaId,
+                                record.blob,
+                                {
+                                    mimeType: record.mimeType,
+                                    width: record.width,
+                                    height: record.height,
+                                    checksum: record.checksum,
+                                },
+                            );
+                            if (!saved.ok) {
+                                return { ok: false, error: saved.error ?? "Could not save synced profile photos." };
+                            }
+                            if (!existingTargetMediaIds.has(record.mediaId)) {
+                                newlyAddedMediaIds.add(record.mediaId);
+                            }
+                            copiedMediaIds.add(record.mediaId);
+                            return { ok: true };
+                        };
+
+                        for (const rec of sourceRecords) {
+                            const loaded =
+                                rec.blob instanceof Blob
+                                    ? rec
+                                    : await mediaRepository.loadMedia(doc.localProfileId, rec.mediaId);
+                            if (!loaded) {
+                                return await failMediaMigration("Could not read synced profile photo data.");
+                            }
+                            const copyRes = await copyRecordToTarget(loaded);
+                            if (!copyRes.ok) {
+                                return await failMediaMigration(copyRes.error);
+                            }
+                        }
+
+                        const cloudReferencedMediaIds = collectReferencedMediaIds(doc.boardData);
+                        const referencedMediaIds = collectReferencedMediaIds(sanitizedDoc.boardData);
+                        for (const mediaId of referencedMediaIds) {
+                            if (copiedMediaIds.has(mediaId)) continue;
+                            const loaded = await mediaRepository.loadMedia(doc.localProfileId, mediaId);
+                            if (!loaded) {
+                                if (!cloudReferencedMediaIds.has(mediaId) && existingTargetMediaIds.has(mediaId)) {
+                                    continue;
+                                }
+                                return await failMediaMigration("Could not load required synced profile photo.");
+                            }
+                            const copyRes = await copyRecordToTarget(loaded);
+                            if (!copyRes.ok) {
+                                return await failMediaMigration(copyRes.error);
+                            }
+                        }
+                    } catch (error) {
+                        const message =
+                            error instanceof Error && error.message
+                                ? error.message
+                                : "Could not migrate synced profile photos.";
+                        return await failMediaMigration(message);
+                    }
+                }
+
+                const latest = get();
+                if (persistenceBlocked || accountProfileOwnerId(latest.currentUser) !== targetOwnerId) {
+                    await rollbackMigratedMedia();
+                    return false;
+                }
+                if (updateInPlaceId !== null) {
+                    if (!latest.profiles.some(p => p.localProfileId === updateInPlaceId)) {
+                        await rollbackMigratedMedia();
+                        return false;
+                    }
+                    const latestExistingDoc =
+                        updateInPlaceId === latest.activeProfileId
+                            ? null
+                            : svc.loadProfileDocument(updateInPlaceId, targetOwnerId).doc;
+                    const isLatestDirty =
+                        updateInPlaceId === latest.activeProfileId
+                            ? latest.dirty
+                            : Boolean(latestExistingDoc?.dirty ?? true);
+                    if (isLatestDirty) {
+                        await rollbackMigratedMedia();
+                        return false;
+                    }
+                    const latestExistingBoardData =
+                        updateInPlaceId === latest.activeProfileId
+                            ? extractBoardData(latest)
+                            : (latestExistingDoc?.boardData ?? null);
+                    sanitizedDoc = buildSanitizedDoc(latestExistingBoardData);
+                } else if (latest.profiles.some(p => p.localProfileId === targetLocalProfileId)) {
+                    await rollbackMigratedMedia();
+                    return false;
+                }
+
+                const keepCurrentActive = updateInPlaceId === null && latest.dirty;
                 const saveRes = svc.saveProfileDocument(sanitizedDoc);
                 if (!saveRes.ok) {
+                    await rollbackMigratedMedia();
                     set({
                         storageStatus: saveRes.status,
                         storageError: saveRes.errorMessage ?? "Could not save synced cloud profile.",
@@ -935,8 +1079,8 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     return false;
                 }
                 const resolvedOwnerId = targetOwnerId;
-                const profiles = s.profiles.some(p => p.localProfileId === targetLocalProfileId)
-                    ? s.profiles.map(p =>
+                const profiles = latest.profiles.some(p => p.localProfileId === targetLocalProfileId)
+                    ? latest.profiles.map(p =>
                           p.localProfileId === targetLocalProfileId
                               ? {
                                     ...p,
@@ -947,7 +1091,7 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                               : p,
                       )
                     : [
-                          ...s.profiles,
+                          ...latest.profiles,
                           {
                               localProfileId: targetLocalProfileId,
                               name: sanitizedDoc.name,
@@ -957,13 +1101,14 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                       ];
                 const indexRes = svc.saveActiveIndex({
                     schemaVersion: PROFILE_SCHEMA_VERSION,
-                    activeProfileId: keepCurrentActive ? s.activeProfileId : targetLocalProfileId,
+                    activeProfileId: keepCurrentActive ? latest.activeProfileId : targetLocalProfileId,
                     profiles,
                 }, targetOwnerId);
                 if (!indexRes.ok) {
                     if (!updateInPlaceId) {
                         svc.deleteProfileDocument(targetLocalProfileId, targetOwnerId);
                     }
+                    await rollbackMigratedMedia();
                     set({
                         storageStatus: indexRes.status,
                         storageError: indexRes.errorMessage ?? "Could not save synced profile index.",
@@ -971,53 +1116,38 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     return false;
                 }
                 if (doc.localProfileId !== targetLocalProfileId) {
-                    void mediaRepository
-                        .listProfileMedia(doc.localProfileId)
-                        .then(async records => {
-                            for (const rec of records) {
-                                const loaded = rec.blob instanceof Blob
-                                    ? rec
-                                    : await mediaRepository.loadMedia(doc.localProfileId, rec.mediaId);
-                                if (!loaded) continue;
-                                await mediaRepository.saveMedia(targetLocalProfileId, loaded.mediaId, loaded.blob, {
-                                    mimeType: loaded.mimeType,
-                                    width: loaded.width,
-                                    height: loaded.height,
-                                    checksum: loaded.checksum,
-                                });
-                            }
-                            if (records.length > 0) {
-                                await discardPreparedMedia(doc.localProfileId);
-                            }
-                        })
-                        .catch(() => undefined);
+                    await discardPreparedMedia(doc.localProfileId).catch(() => undefined);
+                }
+                const afterCleanup = get();
+                if (accountProfileOwnerId(afterCleanup.currentUser) !== targetOwnerId) {
+                    return false;
                 }
                 if (keepCurrentActive) {
                     set({
                         profiles,
                         storageStatus: "ok",
                         storageError: null,
-                        ...refreshDiscoveryLists(s.currentUser, svc),
+                        ...refreshDiscoveryLists(afterCleanup.currentUser, svc),
                     });
                     return true;
                 }
                 ttsService.stop();
                 if (
-                    s.activeProfileId !== targetLocalProfileId ||
-                    s.cloudProfileId !== (sanitizedDoc.cloudProfileId ?? null)
+                    afterCleanup.activeProfileId !== targetLocalProfileId ||
+                    afterCleanup.cloudProfileId !== (sanitizedDoc.cloudProfileId ?? null)
                 ) {
                     chatSocketService.setActiveContext(null);
                 }
                 set({
                     ...buildActivatedProfileState({
                         doc: sanitizedDoc,
-                        previousSentenceRevision: s.sentenceRevision,
+                        previousSentenceRevision: afterCleanup.sentenceRevision,
                         profiles,
                         storageStatus: "ok",
                         storageError: null,
                         dirty: false,
                     }),
-                    ...refreshDiscoveryLists(s.currentUser, svc),
+                    ...refreshDiscoveryLists(afterCleanup.currentUser, svc),
                 });
                 return true;
             },
@@ -1698,6 +1828,10 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
             appendSentenceTile: (tile, boardId) => {
                 const s = get();
                 const history = pushSentenceHistory(s.sentenceHistory, s.sentence);
+                const isPresetColorSystem = Boolean(s.colorSystem && s.colorSystem !== "custom");
+                const presetColorKey = isPresetColorSystem
+                    ? resolveBoardTileColor(tile, s.boards, "catalog", s.colorSystem, boardId)
+                    : undefined;
                 const nextToken: SentenceToken = {
                     instanceId: uid(),
                     tileId: tile.id,
@@ -1705,10 +1839,9 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     spokenText: tile.spokenText || tile.label,
                     iconName: tile.iconName,
                     mediaId: tile.mediaId ?? null,
-                    colorKey: s.colorSystem && s.colorSystem !== "custom"
-                        ? resolveBoardTileColor(tile, s.boards, s.tileAppearance.colorMode, s.colorSystem, boardId)
-                        : tile.colorKey ?? s.boards[tile.categoryId]?.colorKey ?? "slate",
+                    colorKey: presetColorKey ?? tile.colorKey ?? s.boards[tile.categoryId]?.colorKey ?? "slate",
                     wordClass: tile.wordClass,
+                    ...(presetColorKey ? { displayColorKey: presetColorKey } : {}),
                 };
                 const nextSentence = [...s.sentence, nextToken];
                 set({

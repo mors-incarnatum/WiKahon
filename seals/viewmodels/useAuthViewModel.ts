@@ -14,7 +14,7 @@ import {
     type ValidationFieldErrors,
 } from "@/lib/validation";
 import { authService } from "@/services/auth/authService";
-import { useBoardSelector } from "@/store/BoardProvider";
+import { useBoardReady, useBoardSelector } from "@/store/BoardProvider";
 
 export type AuthMode = "login" | "signup";
 export type GuardianSignupRole = "CAREGIVER" | "PARENT";
@@ -25,6 +25,7 @@ export type GuardianSignupRole = "CAREGIVER" | "PARENT";
 export function useAuthViewModel(initialMode: AuthMode = "login") {
     const pathname = usePathname();
     const router = useRouter();
+    const ready = useBoardReady();
     const {
         currentUser,
         activeProfileName,
@@ -49,10 +50,10 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
     const activeMode: AuthMode = routeMode ?? mode;
 
     useEffect(() => {
-        if (currentUser && (pathname === "/login" || pathname === "/register")) {
+        if (ready && currentUser && (pathname === "/login" || pathname === "/register")) {
             router.replace("/board");
         }
-    }, [currentUser, pathname, router]);
+    }, [ready, currentUser, pathname, router]);
 
     // Login & shared password fields
     const [identifier, setIdentifierState] = useState("");
@@ -267,6 +268,7 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
 
     return {
         state: {
+            ready,
             mode: activeMode,
             currentUser,
             isGuardian: isGuardianRole(currentUser?.role),

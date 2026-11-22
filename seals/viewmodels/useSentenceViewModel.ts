@@ -8,6 +8,7 @@ import type { Tile } from "@/lib/board";
 export function useSentenceViewModel() {
     const tokens = useBoardStore(s => s.sentence);
     const config = useBoardStore(s => s.speechConfig);
+    const colorSystem = useBoardStore(s => s.colorSystem ?? "custom");
     const colorMode = useBoardStore(s =>
         (s.colorSystem ?? "custom") === "custom" ? s.tileAppearance.colorMode : "catalog",
     );
@@ -84,6 +85,7 @@ export function useSentenceViewModel() {
             canUndo,
             announcement,
             colorMode,
+            colorSystem,
             ...config,
         },
         actions: {

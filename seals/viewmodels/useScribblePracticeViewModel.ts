@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
-import { useRouter } from "next/navigation";
 import type { Tile } from "@/lib/board";
 import {
     cropAndNormalizeGrid,
@@ -14,7 +13,7 @@ import {
     type VocabularyCandidate,
 } from "@/services/scribble/scribbleOcrService";
 import { useBoardStore } from "@/store/BoardProvider";
-import { getLastBoardPath, useSentenceContext } from "@/viewmodels/useBoardShellViewModel";
+import { useSentenceContext } from "@/viewmodels/useBoardShellViewModel";
 
 export type ScribblePenSize = "sm" | "md" | "lg";
 export type ScribbleTool = "pen" | "eraser";
@@ -25,9 +24,22 @@ export interface ScribbleStroke {
     isEraser?: boolean;
 }
 
+type DrawingHistoryEntry =
+    | { kind: "stroke" }
+    | {
+          kind: "clear";
+          strokes: ScribbleStroke[];
+          recognizedText: string;
+          suggestions: string[];
+          traceScore: number | null;
+          statusMessage: string | null;
+          errorMessage: string | null;
+          recognitionOutcome: string | null;
+      };
+
 const EMPTY_DRAFTS: string[] = [];
-const CANVAS_WIDTH = 640;
-const CANVAS_HEIGHT = 240;
+export const CANVAS_WIDTH = 640;
+export const CANVAS_HEIGHT = 240;
 const GRID_W = 64;
 const GRID_H = 24;
 
@@ -176,10 +188,8 @@ function buildBinaryMask(rgba: Uint8ClampedArray, width: number, height: number)
  * Freehand & Guided Word Tracing modes, drawing tools, and sentence integration.
  */
 export function useScribblePracticeViewModel(
-    onClose?: () => void,
     ocrService: IScribbleOcrService = scribbleOcrService,
 ) {
-    const router = useRouter();
     const sentence = useSentenceContext();
     const tiles = useBoardStore(s => s.tiles);
     const boards = useBoardStore(s => s.boards);
@@ -190,6 +200,7 @@ export function useScribblePracticeViewModel(
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const inkCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const activeStrokeRef = useRef<ScribbleStroke | null>(null);
+    const activePointerRef = useRef<number | null>(null);
     const recognizeRequestRef = useRef(0);
     const wordGridCacheRef = useRef<Map<string, { raw: NormalizedGrid; cropped: NormalizedGrid }>>(new Map());
 
@@ -199,9 +210,11 @@ export function useScribblePracticeViewModel(
     const [tool, setTool] = useState<ScribbleTool>("pen");
     const [showGuides, setShowGuides] = useState(true);
     const [strokes, setStrokes] = useState<ScribbleStroke[]>([]);
+    const [drawingHistory, setDrawingHistory] = useState<DrawingHistoryEntry[]>([]);
     const [categoryFilter, setCategoryFilterState] = useState<string>("all");
     const [targetWordId, setTargetWordId] = useState<string>("n-3");
     const [recognizedText, setRecognizedText] = useState("");
+    const [recognitionOutcome, setRecognitionOutcome] = useState<string | null>(null);
     const [suggestions, setSuggestions] = useState<string[]>([]);
     const [traceScore, setTraceScore] = useState<number | null>(null);
     const [isRecognizing, setIsRecognizing] = useState(false);
@@ -395,6 +408,10 @@ export function useScribblePracticeViewModel(
     const startDraw = (e: PointerEvent<HTMLCanvasElement>) => {
         const canvas = canvasRef.current;
         if (!canvas) return;
+        if (activeStrokeRef.current || (e.pointerType === "mouse" && e.button !== 0)) return;
+        recognizeRequestRef.current++;
+        setIsRecognizing(false);
+        setStatusMessage(null);
         if (typeof canvas.setPointerCapture === "function") {
             try {
                 canvas.setPointerCapture(e.pointerId);
@@ -409,6 +426,7 @@ export function useScribblePracticeViewModel(
             width: tool === "eraser" ? baseWidth * ERASER_MULTIPLIER : baseWidth,
             isEraser: tool === "eraser",
         };
+        activePointerRef.current = e.pointerId;
         activeStrokeRef.current = newStroke;
         setErrorMessage(null);
         redrawCanvas(strokes, newStroke);
@@ -417,7 +435,7 @@ export function useScribblePracticeViewModel(
     const moveDraw = (e: PointerEvent<HTMLCanvasElement>) => {
         const current = activeStrokeRef.current;
         const canvas = canvasRef.current;
-        if (!current || !canvas) return;
+        if (!current || !canvas || activePointerRef.current !== e.pointerId) return;
         current.points.push(getPointerPoint(canvas, e));
         redrawCanvas(strokes, current);
     };
@@ -440,33 +458,57 @@ export function useScribblePracticeViewModel(
         [extractDrawingPayload, getWordGrids, mode, targetTile],
     );
 
-    const endDraw = () => {
+    const endDraw = (e?: PointerEvent<HTMLCanvasElement>) => {
+        if (e && activePointerRef.current !== e.pointerId) return;
         const current = activeStrokeRef.current;
         if (!current) return;
+        activePointerRef.current = null;
         activeStrokeRef.current = null;
         const nextStrokes = [...strokes, current];
         setStrokes(nextStrokes);
+        setDrawingHistory(history => [...history, { kind: "stroke" }]);
         updateLiveTraceScore(nextStrokes);
     };
 
     const undoStroke = () => {
-        if (strokes.length === 0) return;
-        const nextStrokes = strokes.slice(0, -1);
-        setStrokes(nextStrokes);
-        updateLiveTraceScore(nextStrokes);
-        setStatusMessage(null);
-        setErrorMessage(null);
+        const entry = drawingHistory[drawingHistory.length - 1];
+        if (!entry) return;
+        recognizeRequestRef.current++;
+        setIsRecognizing(false);
+        setDrawingHistory(history => history.slice(0, -1));
+        if (entry.kind === "clear") {
+            setStrokes(entry.strokes);
+            setRecognizedText(entry.recognizedText);
+            setSuggestions(entry.suggestions);
+            setTraceScore(entry.traceScore);
+            setStatusMessage(entry.statusMessage);
+            setErrorMessage(entry.errorMessage);
+            setRecognitionOutcome(entry.recognitionOutcome);
+        } else {
+            const nextStrokes = strokes.slice(0, -1);
+            setStrokes(nextStrokes);
+            updateLiveTraceScore(nextStrokes);
+            setStatusMessage(null);
+            setErrorMessage(null);
+        }
     };
 
     const clearCanvas = () => {
+        if (strokes.length === 0) return;
+        setDrawingHistory(history => [...history, {
+            kind: "clear", strokes, recognizedText, suggestions, traceScore,
+            statusMessage: isRecognizing ? null : statusMessage, errorMessage, recognitionOutcome,
+        }]);
         recognizeRequestRef.current++;
         activeStrokeRef.current = null;
+        activePointerRef.current = null;
         setStrokes([]);
         setRecognizedText("");
+        setRecognitionOutcome(null);
         setSuggestions([]);
         setTraceScore(null);
         setIsRecognizing(false);
-        setStatusMessage(null);
+        setStatusMessage("Pad cleared. Use Undo to restore it.");
         setErrorMessage(null);
     };
 
@@ -481,13 +523,7 @@ export function useScribblePracticeViewModel(
         const requestId = ++recognizeRequestRef.current;
         setIsRecognizing(true);
         setErrorMessage(null);
-        setStatusMessage(
-            engine === "tesseract"
-                ? "Running Tesseract.js offline OCR…"
-                : engine === "puter"
-                  ? "Recognizing with Puter.js Cloud OCR…"
-                  : "Matching locally against board vocabulary…",
-        );
+        setStatusMessage("Recognizing…");
 
         try {
             const candidates: VocabularyCandidate[] = wordTiles.map(tile => {
@@ -528,10 +564,18 @@ export function useScribblePracticeViewModel(
 
             setRecognizedText(result.text);
             setSuggestions(result.suggestions);
+            const method = result.engine === "puter" ? "cloud recognition" : result.engine === "tesseract" ? "on-device recognition" : "board vocabulary match";
+            setRecognitionOutcome(result.fallbackUsed
+                ? result.text
+                    ? `Last recognition: ${method} was unavailable or found no text; used board vocabulary match.`
+                    : `Last recognition: ${method} was unavailable or found no text; no board match found.`
+                : result.text
+                  ? `Last recognition: ${method}.`
+                  : `Last recognition: ${method} found no text.`);
             if (result.traceScore !== null) {
                 setTraceScore(result.traceScore);
             }
-            setStatusMessage(result.notice ?? null);
+            setStatusMessage(null);
         } catch (err) {
             if (requestId !== recognizeRequestRef.current) return;
             setErrorMessage(err instanceof Error ? err.message : "Recognition failed.");
@@ -544,6 +588,8 @@ export function useScribblePracticeViewModel(
     };
 
     const setMode = (nextMode: ScribbleMode) => {
+        recognizeRequestRef.current++;
+        setIsRecognizing(false);
         setModeState(nextMode);
         setStatusMessage(null);
         setErrorMessage(null);
@@ -555,12 +601,17 @@ export function useScribblePracticeViewModel(
     };
 
     const setEngine = (nextEngine: ScribbleOcrEngine) => {
+        recognizeRequestRef.current++;
+        setIsRecognizing(false);
         setEngineState(nextEngine);
         setStatusMessage(null);
         setErrorMessage(null);
     };
 
     const setCategoryFilter = (nextCategory: string) => {
+        recognizeRequestRef.current++;
+        setIsRecognizing(false);
+        setStatusMessage(null);
         setCategoryFilterState(nextCategory);
         const matching =
             nextCategory === "all"
@@ -573,8 +624,11 @@ export function useScribblePracticeViewModel(
     };
 
     const selectTargetWord = (id: string) => {
+        recognizeRequestRef.current++;
+        setIsRecognizing(false);
         setTargetWordId(id);
         setRecognizedText("");
+        setRecognitionOutcome(null);
         setSuggestions([]);
         setStatusMessage(null);
         setErrorMessage(null);
@@ -599,8 +653,17 @@ export function useScribblePracticeViewModel(
     };
 
     const applySuggestion = (word: string) => {
+        recognizeRequestRef.current++;
+        setIsRecognizing(false);
         setRecognizedText(word);
         setStatusMessage(`Selected "${word}".`);
+    };
+
+    const editRecognizedText = (text: string) => {
+        recognizeRequestRef.current++;
+        setIsRecognizing(false);
+        setStatusMessage(null);
+        setRecognizedText(text);
     };
 
     const speakText = (text?: string) => {
@@ -637,14 +700,6 @@ export function useScribblePracticeViewModel(
         setStatusMessage(`Added "${text}" to sentence.`);
     };
 
-    const handleClose = () => {
-        if (onClose) {
-            onClose();
-        } else {
-            router.push(getLastBoardPath());
-        }
-    };
-
     return {
         canvasRef,
         state: {
@@ -654,6 +709,7 @@ export function useScribblePracticeViewModel(
             tool,
             showGuides,
             hasStroke: strokes.length > 0,
+            canUndo: drawingHistory.length > 0,
             strokeCount: strokes.length,
             categoryFilter,
             categories,
@@ -662,6 +718,12 @@ export function useScribblePracticeViewModel(
             targetWordId: targetTile?.id ?? "",
             targetTile,
             recognizedText,
+            recognitionDisclosure: engine === "puter"
+                ? "Online recognition sends your drawing to a cloud service. If it’s unavailable, Scribble tries a board vocabulary match on this device."
+                : engine === "tesseract"
+                  ? "Recognition runs on this device; resources may need to download first."
+                  : "Recognize matches your drawing with words on this board, on this device.",
+            recognitionOutcome,
             suggestions,
             traceScore,
             isRecognizing,
@@ -671,7 +733,6 @@ export function useScribblePracticeViewModel(
             isSpeaking: sentence.state.isSpeaking,
         },
         actions: {
-            onClose: handleClose,
             setMode,
             setEngine,
             setPenSize,
@@ -688,7 +749,7 @@ export function useScribblePracticeViewModel(
             clearCanvas,
             recognize,
             mockRecognize: recognize,
-            setRecognizedText,
+            setRecognizedText: editRecognizedText,
             applySuggestion,
             speakText,
             addToSentence,

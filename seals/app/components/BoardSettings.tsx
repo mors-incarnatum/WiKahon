@@ -54,6 +54,14 @@ export default function BoardSettings({
 }) {
     const { state: s, actions: a } = useBoardSettingsViewModel(boardId, initialTab);
     const importInputRef = useRef<HTMLInputElement | null>(null);
+    const childNameRef = useRef<HTMLInputElement | null>(null);
+    const addChildButtonRef = useRef<HTMLButtonElement | null>(null);
+    const unassignTriggerRef = useRef<HTMLButtonElement | null>(null);
+    const unassignCancelRef = useRef<HTMLButtonElement | null>(null);
+    const childStatusRef = useRef<HTMLParagraphElement | null>(null);
+    const [profileSection, setProfileSection] = useState<"boards" | "offline" | "backup" | "cloud" | "children">("boards");
+    const [showChildForm, setShowChildForm] = useState(false);
+    const [unassignChildId, setUnassignChildId] = useState<string | null>(null);
 
     const widthUnits = getDimension(s.appearance.tileWidth);
     const heightUnits = getDimension(s.appearance.tileHeight);
@@ -124,9 +132,9 @@ export default function BoardSettings({
             label={initialTab === "layout" ? "Board layout" : "Board settings"}
             onClose={onClose}
             className="editor-modal"
-            style={{ width: "min(672px, calc(100vw - 24px))", borderRadius: "24px", borderColor: "#DCEEFF", color: "#465365" }}
+            style={{ width: "min(672px, calc(100vw - 24px))", borderRadius: "24px", borderColor: "#DCEEFF", color: "#465365", scrollPaddingTop: "100px" }}
         >
-            <div className="modal-heading rounded-2xl bg-[#FFF9EC] p-4">
+            <div className="modal-heading sticky top-0 z-10 rounded-2xl bg-[#FFF9EC] p-4">
                 <h2>
                     {initialTab === "layout"
                         ? "Board Layout"
@@ -139,9 +147,9 @@ export default function BoardSettings({
 
             {initialTab === "layout" && (
                 <>
-                    <div className="tab-row" role="tablist" aria-label="Board layout section">
-                        <button type="button" role="tab" aria-selected={s.tab === "layout"} onClick={() => a.setTab("layout")}>Grid</button>
-                        <button type="button" role="tab" aria-selected={s.tab === "appearance"} onClick={() => a.setTab("appearance")}>Appearance</button>
+                    <div className="tab-row" role="group" aria-label="Board layout section">
+                        <button type="button" aria-pressed={s.tab === "layout"} onClick={() => a.setTab("layout")}>Grid</button>
+                        <button type="button" aria-pressed={s.tab === "appearance"} onClick={() => a.setTab("appearance")}>Appearance</button>
                     </div>
                     <fieldset hidden={s.tab !== "layout"}>
                         <legend>Board size</legend>
@@ -438,33 +446,33 @@ export default function BoardSettings({
 
             {initialTab !== "layout" && (
                 <>
-                    <div className="tab-row" role="tablist" aria-label="Settings section">
-                        <button type="button" role="tab" aria-selected={s.tab === "colorSystem"} onClick={() => a.setTab("colorSystem")}>
+                    <div className="tab-row" role="group" aria-label="Settings section">
+                        <button type="button" aria-pressed={s.tab === "colorSystem"} onClick={() => a.setTab("colorSystem")}>
                             Color Key
                         </button>
                         <button
                             type="button"
-                            role="tab"
-                            aria-selected={s.tab === "speech"}
+
+                            aria-pressed={s.tab === "speech"}
                             onClick={() => a.setTab("speech")}
                         >
                             Speech
                         </button>
-                        <button type="button" role="tab" aria-selected={s.tab === "access"} onClick={() => a.setTab("access")}>
+                        <button type="button" aria-pressed={s.tab === "access"} onClick={() => a.setTab("access")}>
                             Access
                         </button>
                         <button
                             type="button"
-                            role="tab"
-                            aria-selected={s.tab === "profiles"}
+
+                            aria-pressed={s.tab === "profiles"}
                             onClick={() => a.setTab("profiles")}
                         >
                             Profiles &amp; offline
                         </button>
                         <button
                             type="button"
-                            role="tab"
-                            aria-selected={s.tab === "experiments"}
+
+                            aria-pressed={s.tab === "experiments"}
                             onClick={() => a.setTab("experiments")}
                         >
                             Optional prototypes
@@ -637,7 +645,14 @@ export default function BoardSettings({
                     </fieldset>
 
                     <fieldset hidden={s.tab !== "profiles"}>
-                        <legend>Child profiles &amp; offline backup</legend>
+                        <legend>Profiles &amp; offline</legend>
+                        <nav aria-label="Profile settings tasks" className="filter-pills">
+                            {([['boards', 'Board profiles'], ['offline', 'Offline access'], ['backup', 'Backup'], ['cloud', 'Cloud publishing'], ['children', 'Child accounts']] as const).map(([id, label]) => (
+                                <button key={id} type="button" aria-pressed={profileSection === id} onClick={() => setProfileSection(id)}>{label}</button>
+                            ))}
+                        </nav>
+                        <section hidden={profileSection !== "boards"} aria-label="Board profiles">
+                        <h3>Board profiles</h3>
                         <label>
                             Active profile
                             <select
@@ -704,6 +719,9 @@ export default function BoardSettings({
                                 )
                             )}
                         </div>
+                        </section>
+                        <section hidden={profileSection !== "offline"} aria-label="Offline access">
+                        <h3>Offline access</h3>
                         <label>
                             <input
                                 type="checkbox"
@@ -734,23 +752,22 @@ export default function BoardSettings({
                             </section>
                         )}
 
-                        <h3>Offline readiness (this device)</h3>
-                        <ul>
-                            <li>
-                                App shell cached:{" "}
-                                {s.offlineReadiness.appShellCached ? "Yes" : "Not yet"}
-                            </li>
-                            <li>
-                                Local storage healthy:{" "}
-                                {s.offlineReadiness.localStorageOk ? "Yes" : "Check storage warning"}
-                            </li>
-                            <li>Stored profile media: {s.offlineReadiness.mediaCount} item(s)</li>
-                            <li>Offline speech fallback: Web Speech API</li>
-                        </ul>
+                        <h3>Offline readiness on this device</h3>
+                        {!s.offlineReadinessChecked ? <p role="status">Checking offline readiness…</p> : <ul aria-live="polite">
+                            <li>{s.offlineReadiness.appShellCached ? "Board app is saved for offline use." : "Board app is not ready offline yet. Open the board while connected, then check again."}</li>
+                            <li>{s.offlineReadiness.localStorageOk ? "Local storage is available." : "Check the storage warning and free space or allow site storage."}</li>
+                            <li>{s.offlineReadiness.mediaCount} media item(s) saved for this profile.</li>
+                        </ul>}
+                        <p role="status">{s.offlineSpeechStatus || "Offline speech has not been checked. Disconnect this device and preview speech below."}</p>
+                        <button type="button" disabled={s.offlineSpeechChecking} onClick={() => void a.checkOfflineSpeech()}>
+                            {s.offlineSpeechChecking ? "Checking speech…" : "Preview offline speech"}
+                        </button>
                         <button type="button" onClick={() => void a.refreshOfflineReadiness()}>
                             Re-check offline readiness
                         </button>
 
+                        </section>
+                        <section hidden={profileSection !== "backup"} aria-label="Backup">
                         <h3>Export / import backup</h3>
                         <div className="field-row">
                             <button type="button" onClick={() => void a.downloadBackupFile()}>
@@ -776,7 +793,10 @@ export default function BoardSettings({
                         </div>
                         {s.backupStatus && <p role="status">{s.backupStatus.message}</p>}
 
-                        <h3>Guardian cloud account &amp; sync (Supabase)</h3>
+                        </section>
+                        <section hidden={profileSection !== "cloud"} aria-label="Cloud publishing">
+                        <h3>Cloud publishing</h3>
+                        <p>Publish local changes for child accounts. The board toolbar fetches the latest published board.</p>
                         {!s.cloudConfigured ? (
                             <p>
                                 Cloud sync is not configured on this build. Local boards and backups
@@ -793,6 +813,7 @@ export default function BoardSettings({
                                     Signed in as{" "}
                                     <strong>{s.cloudUser.email ?? s.cloudUser.id}</strong>.
                                 </p>
+                                <p>Published revision on this device: {s.cloudProfileId ? (s.cloudRevision ?? 1) : "Not published"}.</p>
                                 {s.dirty && (
                                     <p role="status">
                                         Unpublished local changes are saved on this device.
@@ -826,9 +847,7 @@ export default function BoardSettings({
                                         disabled={s.cloudBusy}
                                         onClick={() => void a.publishActiveProfile()}
                                     >
-                                        {s.cloudProfileId
-                                            ? `Publish active profile (rev ${s.cloudRevision ?? 1})`
-                                            : "Publish active profile to cloud"}
+                                        {s.cloudBusy ? "Cloud operation in progress…" : "Publish board"}
                                     </button>
                                 </div>
                                 {s.cloudProfiles.length > 0 && (
@@ -886,8 +905,11 @@ export default function BoardSettings({
                         )}
                         {s.cloudStatus && <p role="status">{s.cloudStatus.message}</p>}
 
+                        </section>
+                        <section hidden={profileSection !== "children"} aria-label="Child accounts">
+                        {(!s.cloudConfigured || !s.cloudUser) && <p>Sign in to a configured guardian cloud account to manage child accounts.</p>}
                         {s.cloudConfigured && s.cloudUser && (
-                            <section className="settings-section">
+                            <div className="settings-section">
                                 <h3>Child accounts</h3>
                                 <p>
                                     Create read-only child accounts and optionally assign one of
@@ -895,7 +917,7 @@ export default function BoardSettings({
                                     screen using their username and password.
                                 </p>
 
-                                {s.childLoading && <p>Loading child accounts…</p>}
+                                {s.childLoading && <p role="status">Loading child accounts…</p>}
 
                                 {s.childProvisioningError && (
                                     <p role="alert" className="text-rose-700">
@@ -915,8 +937,8 @@ export default function BoardSettings({
                                                     <li key={child.userId} className="rounded-xl border border-slate-200 p-3">
                                                         <div className="flex flex-wrap items-center justify-between gap-2">
                                                             <span>
-                                                                <strong>{child.name}</strong> (@{child.username}) —{" "}
-                                                                {child.profileName ?? "No board assigned"}
+                                                                <strong>{child.name}</strong> (@{child.username})<br />
+                                                                Assigned board: {child.profileName ?? "No board assigned"}
                                                             </span>
                                                             <div className="flex flex-wrap gap-2">
                                                                 <button
@@ -933,19 +955,12 @@ export default function BoardSettings({
                                                                 >
                                                                     Reset password
                                                                 </button>
-                                                                {child.profileId && (
-                                                                    <button
-                                                                        type="button"
-                                                                        disabled={s.childBusy}
-                                                                        onClick={() =>
-                                                                            void a.removeChildProfileAccess(
-                                                                                child.profileId!,
-                                                                                child.userId,
-                                                                            )
-                                                                        }
-                                                                    >
-                                                                        Unassign board
-                                                                    </button>
+                                                                {child.profileId && unassignChildId !== child.userId && (
+                                                                    <button type="button" data-unassign-child={child.userId} disabled={s.childBusy} onClick={e => {
+                                                                        unassignTriggerRef.current = e.currentTarget;
+                                                                        setUnassignChildId(child.userId);
+                                                                        requestAnimationFrame(() => unassignCancelRef.current?.focus());
+                                                                    }}>Unassign board</button>
                                                                 )}
                                                                 {!isConfirmingDelete ? (
                                                                     <button
@@ -976,6 +991,25 @@ export default function BoardSettings({
                                                             </div>
                                                         </div>
 
+                                                        {child.profileId && unassignChildId === child.userId && (
+                                                            <div className="mt-3" role="group" aria-label="Confirm board unassignment">
+                                                                <p>Unassign {child.profileName ?? "this board"} from {child.name}? This child account will no longer have access to that board.</p>
+                                                                <button type="button" disabled={s.childBusy} onClick={() => {
+                                                                    void a.removeChildProfileAccess(child.profileId!, child.userId).then(ok => {
+                                                                        if (ok) setUnassignChildId(null);
+                                                                        requestAnimationFrame(() => childStatusRef.current?.focus());
+                                                                    });
+                                                                }}>Confirm unassign</button>{" "}
+                                                                <button ref={unassignCancelRef} type="button" disabled={s.childBusy} onClick={() => {
+                                                                    const childId = child.userId;
+                                                                    setUnassignChildId(null);
+                                                                    requestAnimationFrame(() => {
+                                                                        const trigger = document.querySelector<HTMLButtonElement>(`[data-unassign-child="${CSS.escape(childId)}"]`);
+                                                                        (trigger ?? unassignTriggerRef.current)?.focus();
+                                                                    });
+                                                                }}>Cancel</button>
+                                                            </div>
+                                                        )}
                                                         {isEditing && (
                                                             <form
                                                                 noValidate
@@ -1070,11 +1104,19 @@ export default function BoardSettings({
                                     </>
                                 )}
 
+                                <button ref={addChildButtonRef} type="button" className="min-h-11" aria-expanded={showChildForm} aria-controls="add-child-form" onClick={() => { setShowChildForm(true); requestAnimationFrame(() => childNameRef.current?.focus()); }}>Add child account</button>
                                 <form
+                                    id="add-child-form"
+                                    hidden={!showChildForm}
                                     noValidate
                                     onSubmit={e => {
                                         e.preventDefault();
-                                        void a.provisionChildAccount();
+                                        void a.provisionChildAccount().then(ok => {
+                                            if (ok) {
+                                                setShowChildForm(false);
+                                                requestAnimationFrame(() => childStatusRef.current?.focus());
+                                            }
+                                        });
                                     }}
                                 >
                                     <label>
@@ -1101,6 +1143,7 @@ export default function BoardSettings({
                                         <input
                                             type="text"
                                             name="childName"
+                                            ref={childNameRef}
                                             autoComplete="off"
                                             value={s.childName}
                                             aria-invalid={Boolean(
@@ -1190,12 +1233,15 @@ export default function BoardSettings({
                                                 ? "Creating child account…"
                                                 : "Create child account"}
                                         </button>
+                                        <button type="button" disabled={s.childBusy} onClick={() => { a.clearChildProvisionDraft(); setShowChildForm(false); addChildButtonRef.current?.focus(); }}>Cancel</button>
                                     </div>
                                 </form>
 
                                 {s.childStatus && (
                                     <div className="space-y-1">
                                         <p
+                                            ref={childStatusRef}
+                                            tabIndex={-1}
                                             role={s.childStatus.ok ? "status" : "alert"}
                                             className={
                                                 s.childStatus.ok ? "text-emerald-800" : "text-rose-700"
@@ -1220,8 +1266,9 @@ export default function BoardSettings({
                                         )}
                                     </div>
                                 )}
-                            </section>
+                            </div>
                         )}
+                        </section>
                     </fieldset>
 
                     <fieldset hidden={s.tab !== "experiments"}>

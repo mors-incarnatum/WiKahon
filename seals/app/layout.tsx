@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { BoardProvider } from "@/store/BoardProvider";
 import OfflineServiceWorker from "./components/OfflineServiceWorker";
@@ -23,6 +23,13 @@ const inter = localFont({
 export const metadata: Metadata = {
     title: "WiKahon",
     description: "Augmentative and Alternative Communication Board for non-verbal users",
+};
+
+export const viewport: Viewport = {
+    width: "device-width",
+    initialScale: 1,
+    viewportFit: "cover",
+    interactiveWidget: "resizes-content",
 };
 
 export default function RootLayout({

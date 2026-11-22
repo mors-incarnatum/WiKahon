@@ -72,6 +72,10 @@ function PasswordField({
 export default function LoginView({ initialMode = "login" }: { initialMode?: AuthMode } = {}) {
     const { state: s, actions: a } = useAuthViewModel(initialMode);
 
+    if (!s.ready) {
+        return <div role="status">Loading board…</div>;
+    }
+
     if (s.currentUser) return null;
 
     return (

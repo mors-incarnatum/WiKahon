@@ -1,6 +1,12 @@
 "use client";
 import Link from "next/link";
-import { resolveBoardTileColor } from "@/lib/board";
+import { usePathname } from "next/navigation";
+import { BoardPageMemoryContext, createBoardPageMemory } from "@/viewmodels/boardPageMemory";
+import { useEffect, useRef, useState } from "react";
+import { resolveBoardTileColor, type Tile, type ColorKey } from "@/lib/board";
+import { useMediaUrl } from "@/viewmodels/useMediaUrl";
+import { ChatDraftContext } from "@/viewmodels/useChatDraftViewModel";
+/* eslint-disable @next/next/no-img-element */
 import { palette } from "@/app/theme";
 import { useBoardShellViewModel, SentenceContext } from "@/viewmodels/useBoardShellViewModel";
 import { EditContext } from "@/viewmodels/useEditModeViewModel";
@@ -66,6 +72,23 @@ function HeaderIcon({ name }: { name: IconName }) {
     }
 }
 
+function PinnedTile({ tile, color, onActivate }: { tile: Tile; color: ColorKey; onActivate: () => void }) {
+    const { src, missingMedia } = useMediaUrl(tile.iconName, tile.mediaId);
+    return (
+        <button
+            type="button"
+            className="pinned-tile"
+            style={{ backgroundColor: palette[color].surface, borderColor: palette[color].border, color: palette[color].text }}
+            onClick={onActivate}
+            aria-label={`${tile.label}${missingMedia ? ", photo unavailable" : ""}`}
+        >
+            {tile.iconName === "speech" && !tile.mediaId && <span aria-hidden="true">💬</span>}
+            {src && <img src={src} alt="" draggable={false} width={32} height={32} />}
+            {tile.label}
+        </button>
+    );
+}
+
 const iconButtonStyle: React.CSSProperties = {
     width: 42,
     height: 42,
@@ -78,12 +101,38 @@ const iconButtonStyle: React.CSSProperties = {
 
 export default function BoardShell({ children }: { children: React.ReactNode }) {
     const vm = useBoardShellViewModel();
+    const pathname = usePathname();
+    const [pageMemory] = useState(createBoardPageMemory);
+    const addWordsRef = useRef<HTMLButtonElement>(null);
+    const cancelCompositionRef = useRef<HTMLButtonElement>(null);
+    const isComposing = vm.chatDraft.state.isComposing;
+
+    useEffect(() => {
+        if (isComposing && !vm.state.isChatOpen && vm.state.currentUser) {
+            const addButton = addWordsRef.current;
+            (addButton && !addButton.disabled ? addButton : cancelCompositionRef.current)?.focus();
+        }
+    }, [isComposing, vm.state.isChatOpen, vm.state.currentUser]);
+
+    useEffect(() => {
+        if (pathname === "/chat" || pathname === "/scribble") {
+            pageMemory.prepareReturn();
+        } else if (!pathname.startsWith("/board")) {
+            pageMemory.clear();
+        }
+    }, [pathname, pageMemory]);
+
+    if (!vm.state.ready) {
+        return <div role="status">Loading board…</div>;
+    }
 
     if (!vm.state.currentUser) {
         return null;
     }
 
     return (
+        <BoardPageMemoryContext.Provider value={pageMemory}>
+        <ChatDraftContext.Provider value={vm.chatDraft}>
         <SentenceContext.Provider value={vm.sentence}>
             <EditContext.Provider value={vm.edit}>
                 <div
@@ -91,12 +140,12 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                     onPointerDown={vm.edit.actions.touchActivity}
                     onKeyDown={vm.edit.actions.touchActivity}
                 >
-                    <header className="board-header" style={{ padding: "14px 12px", gap: 12 }}>
-                        <Link href="/board" className="brand" onClick={() => vm.actions.setPanel(null)}>
+                    {!vm.state.isChatOpen && <header className="board-header" style={{ padding: "14px 12px", gap: 12 }}>
+                        {vm.state.isScribbleOpen ? <button type="button" className="scribble-back" onClick={vm.actions.toggleScribble}>← Back to board</button> : <Link href="/board" className="brand" onClick={() => vm.actions.setPanel(null)}>
                             <b>W</b> WiKahon
-                        </Link>
+                        </Link>}
                         <SentenceStrip />
-                        <div className="header-tools">
+                        {!vm.state.isScribbleOpen && <div className="header-tools">
                             {vm.state.isGuardian ? (
                                 <>
                                     <span
@@ -135,19 +184,19 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     ✍ Scribble
                                 </button>
                             )}
-                            {vm.state.featureFlags?.parentChildChat && (
+                            {vm.state.featureFlags?.parentChildChat && !isComposing && (
                                 <button
                                     type="button"
                                     aria-pressed={vm.state.isChatOpen}
                                     aria-label={
                                         vm.state.unreadChatCount > 0
-                                            ? `Chat (${vm.state.unreadChatCount} unread ${vm.state.unreadChatCount === 1 ? "message" : "messages"})`
-                                            : "Chat"
+                                            ? `${vm.chatDraft.state.hasDraft ? "Resume chat" : "Chat"} (${vm.state.unreadChatCount} unread ${vm.state.unreadChatCount === 1 ? "message" : "messages"})`
+                                            : vm.chatDraft.state.hasDraft ? "Resume chat" : "Chat"
                                     }
                                     onClick={vm.actions.toggleChat}
                                     className="inline-flex items-center gap-1.5"
                                 >
-                                    💬 Chat
+                                    💬 {vm.chatDraft.state.hasDraft ? "Resume chat" : "Chat"}
                                     {vm.state.unreadChatCount > 0 && (
                                         <span
                                             aria-hidden="true"
@@ -159,7 +208,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                 </button>
                             )}
                             {vm.state.isGuardian && (
-                                <>
+                                <div className="guardian-tools" role="group" aria-label="Guardian board tools">
                                     <button
                                         type="button"
                                         style={iconButtonStyle}
@@ -176,26 +225,26 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     <button type="button" style={iconButtonStyle} aria-label="Settings" title="Settings" onClick={() => vm.actions.setPanel("settings")}>
                                         <HeaderIcon name="settings" />
                                     </button>
-                                </>
+                                </div>
                             )}
                             {vm.state.canSyncCloud && (
                                 <button
                                     type="button"
                                     disabled={vm.state.syncingCloud}
                                     onClick={() => void vm.actions.syncCloudNow()}
-                                    aria-label={vm.state.syncingCloud ? "Syncing board" : "Sync board"}
-                                    title="Sync board from cloud"
+                                    aria-label={vm.state.syncingCloud ? "Getting latest board" : "Get latest board from cloud"}
+                                    title="Get latest board from cloud"
                                 >
-                                    {vm.state.syncingCloud ? "Syncing…" : "Sync"}
+                                    {vm.state.syncingCloud ? "Getting board…" : "Get latest board"}
                                 </button>
                             )}
                             <button type="button" onClick={vm.actions.logout}>
                                 Log out
                             </button>
-                        </div>
-                    </header>
+                        </div>}
+                    </header>}
 
-                    {vm.state.syncStatus && (
+                    {!vm.state.isScribbleOpen && vm.state.syncStatus && (
                         <div className="edit-notice" role="status">
                             <span>{vm.state.syncStatus}</span>{" "}
                             <button type="button" onClick={vm.actions.clearSyncStatus}>
@@ -204,7 +253,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                         </div>
                     )}
 
-                    {vm.state.storageError && (
+                    {!vm.state.isScribbleOpen && vm.state.storageError && (
                         <div className="edit-notice" role="alert">
                             <span>{vm.state.storageError}</span>{" "}
                             {vm.state.isGuardian && (
@@ -220,15 +269,15 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                         </div>
                     )}
 
-                    {vm.state.isGuardian && vm.edit.state.isEditMode && (
+                    {!vm.state.isChatOpen && !vm.state.isScribbleOpen && vm.state.isGuardian && vm.edit.state.isEditMode && (
                         <p className="edit-notice" role="status">
                             Edit mode · Select a tile to customize, move, or hide it. Select an empty slot to add a word or folder.
                         </p>
                     )}
 
-                    {vm.state.featureFlags?.pinnedVocabulary && vm.state.pinnedTiles.length > 0 && (
+                    {!vm.state.isChatOpen && !vm.state.isScribbleOpen && vm.state.featureFlags?.pinnedVocabulary && vm.state.pinnedTiles.length > 0 && (
                         <nav
-                            className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 bg-white border border-slate-300 rounded-md shrink-0"
+                            className="pinned-vocabulary"
                             aria-label="Pinned core vocabulary"
                         >
                             <span className="text-xs font-semibold text-slate-600 mr-1">Pinned:</span>
@@ -240,18 +289,33 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     vm.state.colorSystem,
                                 );
                                 return (
-                                    <button
+                                    <PinnedTile
                                         key={tile.id}
-                                        type="button"
-                                        style={{ backgroundColor: palette[color].surface, borderColor: palette[color].border, color: palette[color].text }}
-                                        className="px-2.5 py-1 text-xs font-semibold border rounded-md"
-                                        onClick={() => vm.sentence.actions.onTileActivate(tile)}
-                                    >
-                                        {tile.label}
-                                    </button>
+                                        tile={tile}
+                                        color={color}
+                                        onActivate={() => vm.sentence.actions.onTileActivate(tile)}
+                                    />
                                 );
                             })}
                         </nav>
+                    )}
+
+                    {isComposing && !vm.state.isChatOpen && !vm.state.isScribbleOpen && (
+                        <div className="chat-composition-controls" role="group" aria-label="Add board words to chat">
+                            <span>Select words for your chat message</span>
+                            <button
+                                ref={addWordsRef}
+                                type="button"
+                                className="primary"
+                                disabled={!vm.chatDraft.state.hasUnusedWords}
+                                onClick={vm.actions.addWordsToChat}
+                            >
+                                Add words to chat
+                            </button>
+                            <button ref={cancelCompositionRef} type="button" onClick={vm.actions.cancelChatComposition}>
+                                Cancel and resume chat
+                            </button>
+                        </div>
                     )}
 
                     <main
@@ -327,5 +391,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                 </div>
             </EditContext.Provider>
         </SentenceContext.Provider>
+        </ChatDraftContext.Provider>
+        </BoardPageMemoryContext.Provider>
     );
 }

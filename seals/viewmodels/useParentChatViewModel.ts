@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { isGuardianRole } from "@/models/auth";
 import { useBoardStore, useBoardStoreApi } from "@/store/BoardProvider";
 import { createBoundChatSocketHandlers, matchesChatBindingContext, resolveChatBindingContext } from "@/store/useBoardStore";
-import { getLastBoardPath, useSentenceContext } from "@/viewmodels/useBoardShellViewModel";
+import { useChatDraftContext } from "@/viewmodels/useChatDraftViewModel";
 import type { ChatMessage } from "@/models/boardData";
 import {
     chatSocketService,
@@ -18,14 +17,13 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 
 /**
  * ViewModel for the Parent-Child Chat modal, managing draft state,
- * sentence copying, live socket connection status, and sending/receiving messages.
+ * board composition, live socket connection status, and sending/receiving messages.
  */
 export function useParentChatViewModel(
     socketService: IChatSocketService = chatSocketService,
     onClose?: () => void,
 ) {
-    const router = useRouter();
-    const sentence = useSentenceContext();
+    const chatDraft = useChatDraftContext();
     const storeApi = useBoardStoreApi();
     const currentUser = useBoardStore(s => s.currentUser);
     const activeProfileId = useBoardStore(s => s.activeProfileId);
@@ -34,10 +32,9 @@ export function useParentChatViewModel(
     const addChatMessage = useBoardStore(s => s.addChatMessage);
     const dismissLegacyMessages = useBoardStore(s => s.dismissLegacyChatMessages);
     const scope = JSON.stringify([currentUser?.id, activeProfileId, cloudProfileId]);
-    const [draftEntry, setDraftEntry] = useState({ scope, text: sentence.state.sentenceText });
     const [errorEntry, setErrorEntry] = useState<{ scope: string; text: string; messageId?: string } | null>(null);
     const [loadOlderErrorEntry, setLoadOlderErrorEntry] = useState<{ scope: string; text: string } | null>(null);
-    const draft = draftEntry.scope === scope ? draftEntry.text : sentence.state.sentenceText;
+    const draft = chatDraft.state.text;
     const sendError = errorEntry?.scope === scope ? errorEntry.text : null;
     const loadOlderError = loadOlderErrorEntry?.scope === scope ? loadOlderErrorEntry.text : null;
     const [connectionStatus, setConnectionStatus] = useState<ChatConnectionStatus>(() =>
@@ -83,12 +80,8 @@ export function useParentChatViewModel(
     }, [socketService, storeApi, scope, boundUserId, boundLocalProfileId, boundCloudProfileId]);
 
     const senderRole: ChatMessage["sender"] = isGuardianRole(currentUser?.role) ? "guardian" : "child";
-    const setDraft = (text: string) => setDraftEntry({ scope, text });
+    const setDraft = chatDraft.actions.setText;
     const setSendError = (text: string, messageId?: string) => setErrorEntry({ scope, text, messageId });
-
-    const copyCurrentSentence = () => {
-        setDraft(sentence.state.sentenceText);
-    };
 
     const sendMessage = async () => {
         const trimmed = draft.trim();
@@ -108,7 +101,7 @@ export function useParentChatViewModel(
             setSendError("Could not save the message on this device.");
             return;
         }
-        setDraft("");
+        chatDraft.actions.clearAfterSend();
         if (!boundChatContext) {
             return;
         }
@@ -142,7 +135,7 @@ export function useParentChatViewModel(
         if (onClose) {
             onClose();
         } else {
-            router.push(getLastBoardPath());
+            chatDraft.actions.returnToBoard();
         }
     };
 
@@ -157,8 +150,8 @@ export function useParentChatViewModel(
             draft,
             senderRole,
             currentUserId: currentUser?.id ?? null,
-            sentenceText: sentence.state.sentenceText,
-            isSentenceEmpty: sentence.state.isEmpty,
+            scope,
+            focusOnResume: chatDraft.state.focusOnResume,
             connectionStatus,
             isConnected: connectionStatus === "connected",
             sendError,
@@ -166,7 +159,11 @@ export function useParentChatViewModel(
         actions: {
             onClose: handleClose,
             setDraft,
-            copyCurrentSentence,
+            useWords: () => {
+                chatDraft.actions.beginComposition();
+                handleClose();
+            },
+            consumeResumeFocus: chatDraft.actions.consumeResumeFocus,
             sendMessage,
             sendAsChild: sendMessage,
             loadOlderMessages,

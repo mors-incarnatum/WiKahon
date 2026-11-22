@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import { useCallback, useContext, useMemo, useRef, useState, useEffect } from "react";
 import { useBoardSelector } from "@/store/BoardProvider";
+import { BoardPageMemoryContext } from "./boardPageMemory";
 import { cellKey, clampGrid, inBounds, type CellKey } from "@/lib/board";
 
 type ArrowKey = "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown";
@@ -60,6 +61,8 @@ function findNextEnabledButton(
 export function useBoardGridViewModel(boardId: string, editing: boolean) {
     const {
         board,
+        userId,
+        profileId,
         global,
         globalMode,
         tiles,
@@ -74,6 +77,8 @@ export function useBoardGridViewModel(boardId: string, editing: boolean) {
         togglePinnedTile,
     } = useBoardSelector(s => ({
         board: s.boards[boardId],
+        userId: s.currentUser?.id ?? "",
+        profileId: s.activeProfileId,
         global: s.gridConfig,
         globalMode: s.layoutMode ?? "manual",
         tiles: s.tiles,
@@ -88,6 +93,7 @@ export function useBoardGridViewModel(boardId: string, editing: boolean) {
         togglePinnedTile: s.togglePinnedTile,
     }));
 
+    const pageMemory = useContext(BoardPageMemoryContext);
     const [page, setPage] = useState(0);
     const [target, setTarget] = useState<CellKey | null>(null);
     const [targetPage, setTargetPage] = useState(0);
@@ -208,6 +214,25 @@ export function useBoardGridViewModel(boardId: string, editing: boolean) {
         };
     }, [automatic, appearance.gridGap, setBoardSize]);
 
+    const initializedMemoryKey = useRef<string | null>(null);
+    useEffect(() => {
+        const container = scrollRef.current;
+        if (!pageMemory || !container || !userId || (automatic && (!boardSize.width || !boardSize.height))) return;
+        const key = JSON.stringify([userId, profileId, boardId]);
+        if (initializedMemoryKey.current === key) return;
+        const frame = requestAnimationFrame(() => {
+            const savedPage = pageMemory.claim(userId, profileId, boardId);
+            const destination = savedPage === null ? 0 : Math.min(savedPage, pageCount - 1);
+            initializedMemoryKey.current = key;
+            pageMemory.save({ userId, profileId, boardId, page: destination });
+            if (savedPage !== null) {
+                container.scrollTop = destination * container.clientHeight;
+                setPage(destination);
+            }
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [pageMemory, userId, profileId, boardId, automatic, boardSize.width, boardSize.height, pageCount]);
+
     return {
         scrollRef,
         state: {
@@ -292,7 +317,11 @@ export function useBoardGridViewModel(boardId: string, editing: boolean) {
             onScroll: (e: React.UIEvent<HTMLDivElement>) => {
                 const { scrollTop, clientHeight } = e.currentTarget;
                 if (clientHeight > 0) {
-                    setPage(Math.min(pageCount - 1, Math.round(scrollTop / clientHeight)));
+                    const nextPage = Math.min(pageCount - 1, Math.round(scrollTop / clientHeight));
+                    setPage(nextPage);
+                    if (pageMemory && userId && initializedMemoryKey.current === JSON.stringify([userId, profileId, boardId])) {
+                        pageMemory.save({ userId, profileId, boardId, page: nextPage });
+                    }
                 }
             },
             reflow: () => reflowBoardToGrid(boardId, configuredGrid),

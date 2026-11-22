@@ -1,5 +1,5 @@
 "use client";
-import { createContext, Fragment, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { verifySessionServerAction } from "@/app/actions/auth";
@@ -16,6 +16,7 @@ const SESSION_CHECK_INTERVAL_MS = 30_000;
 const CLOUD_RESYNC_COOLDOWN_MS = 30_000;
 
 const BoardContext = createContext<BoardStore | null>(null);
+const BoardReadyContext = createContext<boolean>(false);
 
 export function BoardProvider({ children }: { children: React.ReactNode }) {
     const [store] = useState(() => createBoardStore());
@@ -188,7 +189,7 @@ export function BoardProvider({ children }: { children: React.ReactNode }) {
                     dirty,
                     !dirty && cloudProfileId ? currentActiveProfileId : undefined,
                 )
-                .then(res => {
+                .then(async res => {
                     if (res.ok && res.updated && res.doc) {
                         const latest = store.getState();
                         if (
@@ -197,15 +198,20 @@ export function BoardProvider({ children }: { children: React.ReactNode }) {
                             latest.currentUser?.id !== userId ||
                             latest.activeProfileId !== currentActiveProfileId ||
                             latest.cloudProfileId !== cloudProfileId ||
-                            !latest.applySyncedCloudProfile(res.doc)
+                            !(await latest.applySyncedCloudProfile(res.doc))
                         ) {
-                            if (res.doc.localProfileId !== currentActiveProfileId) {
+                            if (
+                                res.doc.localProfileId !== currentActiveProfileId &&
+                                res.doc.localProfileId !== store.getState().activeProfileId
+                            ) {
                                 return discardPreparedMedia(res.doc.localProfileId);
                             }
                             return;
                         }
-                        const after = store.getState();
-                        lastSyncKeyRef.current = `${userId}:${after.activeProfileId}:${after.cloudProfileId ?? "none"}`;
+                        if (syncGen === syncGenRef.current && store.getState().currentUser?.id === userId) {
+                            const after = store.getState();
+                            lastSyncKeyRef.current = `${userId}:${after.activeProfileId}:${after.cloudProfileId ?? "none"}`;
+                        }
                     }
                 })
                 .catch(() => undefined)
@@ -249,9 +255,13 @@ export function BoardProvider({ children }: { children: React.ReactNode }) {
 
     return (
         <BoardContext.Provider value={store}>
-            {ready ? <Fragment key={userId}>{children}</Fragment> : <div role="status">Loading board…</div>}
+            <BoardReadyContext.Provider value={ready}>{children}</BoardReadyContext.Provider>
         </BoardContext.Provider>
     );
+}
+
+export function useBoardReady(): boolean {
+    return useContext(BoardReadyContext);
 }
 
 export function useBoardStoreApi(): BoardStore {

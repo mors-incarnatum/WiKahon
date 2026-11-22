@@ -650,8 +650,8 @@ export async function removeChildProfileAccessServerAction(input: {
         return { ok: false, error: ctx.error };
     }
 
-    const profileId = input.profileId.trim();
-    const childUserId = input.childUserId.trim();
+    const profileId = typeof input?.profileId === "string" ? input.profileId.trim() : "";
+    const childUserId = typeof input?.childUserId === "string" ? input.childUserId.trim() : "";
     if (!UUID_REGEX.test(profileId) || !UUID_REGEX.test(childUserId)) {
         return { ok: false, error: "Invalid profile or child account identifier." };
     }
@@ -671,20 +671,35 @@ export async function removeChildProfileAccessServerAction(input: {
         return { ok: false, error: "You can only manage access for cloud profiles you own." };
     }
 
-    const accountRes = await fetchChildAccountById(adminClient, childUserId);
-    if (!accountRes.ok) {
-        return { ok: false, error: accountRes.error ?? "Could not verify child account." };
+    const { data: membership, error: membershipError } = await adminClient
+        .from("profile_memberships")
+        .select("profile_id")
+        .eq("profile_id", profileId)
+        .eq("user_id", childUserId)
+        .maybeSingle();
+
+    if (membershipError) {
+        return { ok: false, error: membershipError.message };
     }
-    if (!accountRes.account || accountRes.account.role !== "CHILD") {
-        return { ok: false, error: "Target user is not a child account." };
+    if (!membership) {
+        return { ok: false, error: "This child account is not assigned to this cloud profile." };
     }
 
-    if (accountRes.hasGuardianColumn && !accountRes.account.guardian_id) {
-        await adminClient
+    const ownership = await verifyGuardianOwnsChild(adminClient, session.user.id, childUserId);
+    if (!ownership.ok) {
+        return { ok: false, error: ownership.error };
+    }
+
+    if (ownership.hasGuardianColumn && !ownership.account.guardian_id) {
+        const { error: backfillError } = await adminClient
             .from("user_accounts")
             .update({ guardian_id: session.user.id })
             .eq("user_id", childUserId)
             .is("guardian_id", null);
+
+        if (backfillError) {
+            return { ok: false, error: backfillError.message };
+        }
     }
 
     const { error: deleteError } = await adminClient

@@ -6,7 +6,7 @@ import type { Tile } from "@/lib/board";
 import { chatSocketService } from "@/services/chat/chatSocketService";
 import { cloudSyncService } from "@/services/cloud/cloudSyncService";
 import { discardPreparedMedia } from "@/services/storage/mediaRepository";
-import { useBoardStore, useBoardStoreApi } from "@/store/BoardProvider";
+import { useBoardReady, useBoardStore, useBoardStoreApi } from "@/store/BoardProvider";
 import {
     chatReadScopeKey,
     countUnreadChatMessages,
@@ -14,18 +14,13 @@ import {
     resolveChatBindingContext,
 } from "@/store/useBoardStore";
 import { useSentenceViewModel } from "./useSentenceViewModel";
+import { useChatDraftViewModel } from "./useChatDraftViewModel";
 import { useEditModeViewModel } from "./useEditModeViewModel";
 
 export type ShellPanel = "settings" | "profiles" | "catalogs" | "layout" | "scribble" | "chat" | null;
 type LocalPanel = "settings" | "profiles" | "catalogs" | "layout" | null;
 
 const DEFAULT_PINNED_TILE_IDS = ["n-5", "n-3", "n-1", "p-4", "f-1"] as const;
-
-let lastBoardPath = "/board";
-
-export function getLastBoardPath(): string {
-    return lastBoardPath || "/board";
-}
 
 export const SentenceContext = createContext<ReturnType<typeof useSentenceViewModel> | null>(null);
 
@@ -43,10 +38,12 @@ export function useBoardShellViewModel() {
     const params = useParams<{ categoryId?: string | string[] }>();
 
     const storeApi = useBoardStoreApi();
+    const ready = useBoardReady();
     const currentUser = useBoardStore(s => s.currentUser);
     const activeProfileId = useBoardStore(s => s.activeProfileId);
     const activeProfileName = useBoardStore(s => s.activeProfileName);
     const cloudProfileId = useBoardStore(s => s.cloudProfileId);
+    const profileScope = JSON.stringify([currentUser?.id, activeProfileId, cloudProfileId]);
     const storageStatus = useBoardStore(s => s.storageStatus);
     const storageError = useBoardStore(s => s.storageError);
     const dirty = useBoardStore(s => s.dirty);
@@ -72,7 +69,15 @@ export function useBoardShellViewModel() {
         userId: string;
         coords: { x: number; y: number };
     } | null>(null);
-    const lastBoardPathRef = useRef(pathname.startsWith("/board") ? pathname : "/board");
+    const lastBoardLocation = useRef({
+        scope: profileScope,
+        path: pathname.startsWith("/board") ? pathname : "/board",
+    });
+    const returnToBoard = () => {
+        const { scope, path } = lastBoardLocation.current;
+        router.push(scope === profileScope ? path : "/board");
+    };
+    const chatDraft = useChatDraftViewModel(profileScope, sentence.state.tokens, returnToBoard);
 
     useEffect(() => {
         if (!syncStatus) return;
@@ -82,16 +87,15 @@ export function useBoardShellViewModel() {
 
     useEffect(() => {
         if (pathname.startsWith("/board")) {
-            lastBoardPath = pathname;
-            lastBoardPathRef.current = pathname;
+            lastBoardLocation.current = { scope: profileScope, path: pathname };
         }
-    }, [pathname]);
+    }, [pathname, profileScope]);
 
     useEffect(() => {
-        if (!currentUser) {
+        if (ready && !currentUser) {
             router.replace("/login");
         }
-    }, [currentUser, router]);
+    }, [ready, currentUser, router]);
 
     const isGuardian = isGuardianRole(currentUser?.role);
     const wheelEnabled = featureFlags?.categoryWheel ?? false;
@@ -169,8 +173,7 @@ export function useBoardShellViewModel() {
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
             if (pathname !== "/chat") {
                 if (pathname.startsWith("/board")) {
-                    lastBoardPath = pathname;
-                    lastBoardPathRef.current = pathname;
+                    lastBoardLocation.current = { scope: profileScope, path: pathname };
                 }
                 router.push("/chat");
             }
@@ -180,8 +183,7 @@ export function useBoardShellViewModel() {
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
             if (pathname !== "/scribble") {
                 if (pathname.startsWith("/board")) {
-                    lastBoardPath = pathname;
-                    lastBoardPathRef.current = pathname;
+                    lastBoardLocation.current = { scope: profileScope, path: pathname };
                 }
                 router.push("/scribble");
             }
@@ -194,15 +196,15 @@ export function useBoardShellViewModel() {
             }
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
             if (pathname === "/chat" || pathname === "/scribble") {
-                router.push(lastBoardPathRef.current || "/board");
+                returnToBoard();
             }
             return;
         }
         setLocalPanelState({ userId: currentUser?.id ?? null, panel: next });
     };
 
-    const toggleChat = () => (pathname === "/chat" ? router.push(lastBoardPathRef.current || "/board") : setPanel("chat"));
-    const toggleScribble = () => (pathname === "/scribble" ? router.push(lastBoardPathRef.current || "/board") : setPanel("scribble"));
+    const toggleChat = () => (pathname === "/chat" ? returnToBoard() : setPanel("chat"));
+    const toggleScribble = () => (pathname === "/scribble" ? returnToBoard() : setPanel("scribble"));
 
     const canSyncCloud = Boolean(
         currentUser &&
@@ -232,10 +234,18 @@ export function useBoardShellViewModel() {
                     latest.currentUser?.id === userId &&
                     latest.activeProfileId === targetLocalProfileId &&
                     latest.cloudProfileId === targetCloudProfileId;
-                if (sameTarget && latest.applySyncedCloudProfile(res.doc)) {
+                if (sameTarget && (await latest.applySyncedCloudProfile(res.doc))) {
                     setSyncStatus("Synced from cloud");
-                } else if (res.doc.localProfileId !== latest.activeProfileId) {
-                    await discardPreparedMedia(res.doc.localProfileId);
+                } else {
+                    if (
+                        res.doc.localProfileId !== targetLocalProfileId &&
+                        res.doc.localProfileId !== storeApi.getState().activeProfileId
+                    ) {
+                        await discardPreparedMedia(res.doc.localProfileId);
+                    }
+                    if (sameTarget && !storeApi.getState().storageError) {
+                        setSyncStatus("Cloud sync failed.");
+                    }
                 }
             } else if (res.ok && res.conflictProfile) {
                 setSyncStatus("Newer cloud version available in Settings → Profiles.");
@@ -265,8 +275,10 @@ export function useBoardShellViewModel() {
 
     return {
         sentence,
+        chatDraft,
         edit,
         state: {
+            ready,
             currentUser,
             isGuardian,
             panel: activePanel,
@@ -292,6 +304,14 @@ export function useBoardShellViewModel() {
         actions: {
             setPanel,
             toggleChat,
+            addWordsToChat: () => {
+                chatDraft.actions.useWords();
+                router.push("/chat");
+            },
+            cancelChatComposition: () => {
+                chatDraft.actions.cancelComposition();
+                router.push("/chat");
+            },
             toggleScribble,
             syncCloudNow,
             clearSyncStatus: () => setSyncStatus(null),

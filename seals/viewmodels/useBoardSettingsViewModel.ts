@@ -173,6 +173,8 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         : { profileId: activeProfileId, system: colorSystem, mode: appearance.colorMode, saved: false };
 
     const [speechPreviewError, setSpeechPreviewError] = useState("");
+    const [offlineSpeechStatus, setOfflineSpeechStatus] = useState("");
+    const [offlineSpeechChecking, setOfflineSpeechChecking] = useState(false);
 
     const [newProfileName, setNewProfileName] = useState("");
     const renameKey = `${activeProfileId}:${activeProfileName}`;
@@ -246,6 +248,7 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
         (dirty && matchingCloudProfile && (matchingCloudProfile.revision ?? 1) > (cloudRevision ?? 0)) ||
         staleConflictProfileId === activeProfileId,
     );
+    const [checkedOfflineProfileId, setCheckedOfflineProfileId] = useState<string | null>(null);
     const [offlineReadiness, setOfflineReadiness] = useState<OfflineReadiness>({
         appShellCached: false,
         localStorageOk: storageStatus === "ok",
@@ -281,6 +284,7 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             localStorageOk: storageStatus === "ok",
             mediaCount: media.length,
         });
+        setCheckedOfflineProfileId(activeProfileId);
         if (cloudSyncService.isConfigured() && sessionCloudUser) {
             setChildLoading(true);
             try {
@@ -533,6 +537,9 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
             newProfileName,
             backupStatus,
             offlineReadiness,
+            offlineReadinessChecked: checkedOfflineProfileId === activeProfileId,
+            offlineSpeechStatus,
+            offlineSpeechChecking,
             offlineDesignatedProfiles,
             isActiveProfileOfflineDesignated,
             recoverableLegacyProfiles,
@@ -646,6 +653,26 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                 return ok;
             },
             setSpeech,
+            checkOfflineSpeech: async () => {
+                if (navigator.onLine !== false) {
+                    setOfflineSpeechStatus("Disconnect this device from the internet, then preview offline speech.");
+                    return;
+                }
+                setOfflineSpeechChecking(true);
+                setOfflineSpeechStatus("");
+                try {
+                    await ttsService.speak({ text: "Kumusta, gusto ko ng tubig", rate: speech.rate ?? 1, volume: speech.volume });
+                    setOfflineSpeechStatus(navigator.onLine === false
+                        ? "Speech preview completed while this device was offline. Confirm you heard it."
+                        : "The connection changed during the preview. Disconnect and try again.");
+                } catch (error) {
+                    setOfflineSpeechStatus(error instanceof SpeechError && error.kind === "cancelled"
+                        ? "Speech preview was cancelled. Try again while offline."
+                        : "Offline speech could not be played. Check your device voice settings and try again.");
+                } finally {
+                    setOfflineSpeechChecking(false);
+                }
+            },
             setAccess,
             setFeatureFlags: (patch: Partial<FeatureFlags>) => setFeatureFlags(patch),
             previewSpeech: async () => {
@@ -857,8 +884,18 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                 setSelectedChildProfileIdState(value);
                 clearChildFieldError("profileId");
             },
+            clearChildProvisionDraft: () => {
+                setChildNameState("");
+                setChildUsernameState("");
+                setChildEmailState("");
+                setChildPasswordState("");
+                setChildConfirmPasswordState("");
+                setSelectedChildProfileIdState("");
+                setChildFieldErrors({});
+                setChildStatus(previous => previous?.ok ? previous : null);
+            },
             provisionChildAccount: async () => {
-                if (!sessionCloudUser || childBusy) return;
+                if (!sessionCloudUser || childBusy) return false;
                 setChildStatus(null);
                 setChildFieldErrors({});
 
@@ -873,7 +910,7 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                 if (!validation.ok) {
                     setChildFieldErrors(validation.fieldErrors);
                     setChildStatus({ ok: false, message: validation.error });
-                    return;
+                    return false;
                 }
 
                 setChildBusy(true);
@@ -885,7 +922,7 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                             ok: false,
                             message: res.error ?? "Could not create child account.",
                         });
-                        return;
+                        return false;
                     }
 
                     const createdChild = res.child;
@@ -894,6 +931,7 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                     setChildEmailState("");
                     setChildPasswordState("");
                     setChildConfirmPasswordState("");
+                    setSelectedChildProfileIdState("");
                     setChildFieldErrors({});
                     setChildCopyFeedback(null);
                     setLastCreatedChild({
@@ -912,11 +950,13 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                     if (!refreshed) {
                         setProvisionedChildren(prev => [...prev, createdChild]);
                     }
+                    return true;
                 } catch (err) {
                     setChildStatus({
                         ok: false,
                         message: err instanceof Error ? err.message : "Could not create child account.",
                     });
+                    return false;
                 } finally {
                     setChildBusy(false);
                 }
@@ -1088,7 +1128,7 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                 }
             },
             removeChildProfileAccess: async (profileId: string, childUserId: string) => {
-                if (!sessionCloudUser || childBusy) return;
+                if (!sessionCloudUser || childBusy) return false;
                 setChildStatus(null);
                 setChildBusy(true);
                 try {
@@ -1101,7 +1141,7 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                             ok: false,
                             message: res.error ?? "Could not unassign board.",
                         });
-                        return;
+                        return false;
                     }
                     setProvisionedChildren(prev =>
                         prev.map(c =>
@@ -1114,11 +1154,13 @@ export function useBoardSettingsViewModel(boardId: string, initialTab: SettingsT
                         ok: true,
                         message: "Unassigned board from child account. The account remains active.",
                     });
+                    return true;
                 } catch (err) {
                     setChildStatus({
                         ok: false,
                         message: err instanceof Error ? err.message : "Could not unassign board.",
                     });
+                    return false;
                 } finally {
                     setChildBusy(false);
                 }
