@@ -1,643 +1,745 @@
 "use client";
-import { useEffect, useState } from "react";
-import { GRID_PRESETS } from "@/lib/board";
-import { useBoardSettingsViewModel } from "@/viewmodels/useBoardSettingsViewModel";
-import { useEditContext } from "@/viewmodels/useEditModeViewModel";
-import type { BoardData } from "@/store/useBoardStore";
-import Modal from "./Modal";
 
-function getDimension(value: number | undefined) {
-    if (value === undefined || value === 1) return 50;
-    if (value > 1) return Math.max(1, Math.min(100, Math.round(value)));
-    return Math.max(1, Math.min(100, Math.round(value * 100)));
+import { useState, type ReactNode } from "react";
+import {
+    X,
+    Check,
+    Sliders,
+    Grid3X3,
+    Volume2,
+    Lock,
+    RotateCcw,
+    AlertTriangle,
+    Palette
+} from "lucide-react";
+import {
+    GRID_LIMITS,
+    GRID_PRESETS,
+    COLOR_SYSTEMS,
+    type ColorSystemId
+} from "@/lib/board";
+import { useBoardSettingsViewModel } from "@/viewmodels/useBoardSettingsViewModel";
+
+type SettingsTab = "grid" | "appearance" | "speech" | "access" | "colorSystem";
+
+interface BoardSettingsProps {
+    open: boolean;
+    onClose: () => void;
+    boardId?: string;
+    onBoardReset?: () => void;
+    mode?: "settings" | "layout";
 }
 
-export default function BoardSettings({
-    boardId,
+const SETTINGS_TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
+    { id: "colorSystem", label: "Color Key", icon: <Palette className="h-4 w-4" /> },
+    { id: "speech", label: "Speech", icon: <Volume2 className="h-4 w-4" /> },
+    { id: "access", label: "Access", icon: <Lock className="h-4 w-4" /> }
+];
+
+const LAYOUT_TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
+    { id: "grid", label: "Grid", icon: <Grid3X3 className="h-4 w-4" /> },
+    { id: "appearance", label: "Appearance", icon: <Sliders className="h-4 w-4" /> }
+];
+
+export function BoardSettings({
+    open,
     onClose,
-    initialTab = "speech"
-}: {
-    boardId: string;
-    onClose: () => void;
-    initialTab?: "layout" | "speech";
-}) {
-    const { state: s, actions: a } = useBoardSettingsViewModel(boardId);
-    const edit = useEditContext();
+    boardId,
+    onBoardReset,
+    mode = "settings"
+}: BoardSettingsProps) {
+    const defaultTab = mode === "layout" ? "grid" : "colorSystem";
+    const [tab, setTab] = useState<SettingsTab>(defaultTab);
+    const [confirmReset, setConfirmReset] = useState(false);
 
-    const widthUnits = getDimension(s.appearance.tileWidth);
-    const heightUnits = getDimension(s.appearance.tileHeight);
+    const tabs = mode === "layout" ? LAYOUT_TABS : SETTINGS_TABS;
 
-    const [widthInput, setWidthInput] = useState(String(widthUnits));
-    const [heightInput, setHeightInput] = useState(String(heightUnits));
+    const {
+        board,
+        scope,
+        hasBoardOverride,
+        draftGrid,
+        draftMode,
+        draftAppearance,
+        draftSpeech,
+        draftAccess,
+        draftColorSystem,
+        pinInput,
+        pinError,
+        savedNotice,
+        isAutomatic,
+        estimatedPages,
+        outOfBoundsTiles,
+        setPinInput,
+        changeScope,
+        changeDraftMode,
+        changeDraftGrid,
+        changeDraftColorSystem,
+        patchAppearance,
+        patchSpeech,
+        patchAccess,
+        applyAllChanges,
+        reflowTiles,
+        savePin,
+        removePin,
+        resetEverything
+    } = useBoardSettingsViewModel(open, boardId, onBoardReset);
 
-    useEffect(() => {
-        setWidthInput(String(widthUnits));
-    }, [widthUnits]);
+    if (!open) return null;
 
-    useEffect(() => {
-        setHeightInput(String(heightUnits));
-    }, [heightUnits]);
-
-    const updateDimension = (
-        dimension: "tileWidth" | "tileHeight",
-        value: string
-    ) => {
-        if (!/^\d{0,3}$/.test(value)) return;
-
-        if (dimension === "tileWidth") setWidthInput(value);
-        else setHeightInput(value);
-
-        if (value === "") return;
-
-        const number = Number(value);
-        if (number < 1) return;
-
-        a.setAppearance({
-            ...s.appearance,
-            [dimension]: Math.min(100, number)
-        });
-    };
-
-    const finishDimensionInput = (
-        dimension: "tileWidth" | "tileHeight"
-    ) => {
-        const value = dimension === "tileWidth" ? widthInput : heightInput;
-        const currentValue = dimension === "tileWidth" ? widthUnits : heightUnits;
-        const number = Math.max(
-            1,
-            Math.min(100, value === "" ? currentValue : Number(value))
-        );
-
-        a.setAppearance({
-            ...s.appearance,
-            [dimension]: number
-        });
-
-        if (dimension === "tileWidth") setWidthInput(String(number));
-        else setHeightInput(String(number));
-    };
-
-    const changeDimension = (
-        dimension: "tileWidth" | "tileHeight",
-        value: number
-    ) => {
-        a.setAppearance({
-            ...s.appearance,
-            [dimension]: value
-        });
+    const handleSave = () => {
+        applyAllChanges();
+        onClose();
     };
 
     return (
-        <Modal
-            label={initialTab === "layout" ? "Board layout" : "Board settings"}
-            onClose={onClose}
-            className="editor-modal"
+        <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[#465365]/40 p-4 backdrop-blur-sm"
+            onClick={onClose}
         >
-            <div className="modal-heading">
-                <h2>
-                    {initialTab === "layout"
-                        ? "Board size & appearance"
-                        : "Speech & access"}
-                </h2>
-                <button onClick={onClose} aria-label="Close settings">
-                    ✕
-                </button>
-            </div>
+            <div
+                className="flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-[#DCEEFF] bg-white shadow-2xl font-sans text-[#465365]"
+                onClick={e => e.stopPropagation()}
+            >
+                <div className="flex items-center justify-between border-b border-slate-200 bg-[#FFF9EC] px-6 py-4">
+                    <div>
+                        <h2 className="font-nunito text-lg font-extrabold text-[#465365]">
+                            {mode === "layout" ? "Board Layout" : "Board Settings"}
+                        </h2>
+                        <p className="font-sans text-xs text-[#465365]/75">
+                            {mode === "layout"
+                                ? "Configure grid layout and tile appearance."
+                                : "Configure color coding systems, speech, and caregiver access."}
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        aria-label="Close modal"
+                        className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-[#465365] hover:bg-[#DCEEFF]/50"
+                    >
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
 
-            {initialTab === "layout" && (
-                <>
-                    <fieldset disabled={!edit.state.isEditMode}>
-                        <legend>Board size</legend>
+                <div
+                    className="grid gap-1.5 border-b border-slate-200 bg-[#FFF9EC]/60 px-6 py-2.5"
+                    style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
+                >
+                    {tabs.map(item => {
+                        const active = tab === item.id;
+                        return (
+                            <button
+                                key={item.id}
+                                type="button"
+                                onClick={() => setTab(item.id)}
+                                className={`flex items-center justify-center gap-1.5 rounded-xl py-2.5 text-xs font-bold transition-all ${
+                                    active
+                                        ? "border border-[#B6D8FA] bg-[#DCEEFF] text-[#465365] shadow-sm"
+                                        : "text-[#465365]/70 hover:bg-[#DCEEFF]/40 hover:text-[#465365]"
+                                }`}
+                            >
+                                {item.icon}
+                                {item.label}
+                            </button>
+                        );
+                    })}
+                </div>
 
-                        <div className="settings-section">
-                            <label>
-                                Apply to
-                                <select
-                                    value={s.scope}
-                                    onChange={e => a.setScope(e.target.value)}
-                                >
-                                    <option value="global">
-                                        All boards using global layout
-                                    </option>
-                                    <option value="board">
-                                        Specific board
-                                    </option>
-                                </select>
-                            </label>
-
-                            {s.scope === "board" && (
-                                <div className="settings-section">
-                                    <label>
-                                        Board
-                                        <select
-                                            value={s.selected}
-                                            onChange={e => a.selectBoard(e.target.value)}
+                <div className="flex-1 space-y-5 overflow-y-auto p-6 font-sans">
+                    {tab === "grid" && (
+                        <>
+                            {board && (
+                                <div className="space-y-2">
+                                    <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                                        Scope
+                                    </span>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => changeScope("this")}
+                                            className={`rounded-xl border px-3 py-2.5 text-left text-xs font-bold transition-all ${
+                                                scope === "this"
+                                                    ? "border-[#B6D8FA] bg-[#DCEEFF] text-[#465365]"
+                                                    : "border-slate-200 bg-[#FFF9EC]/50 text-[#465365]/80 hover:bg-[#DCEEFF]/40"
+                                            }`}
                                         >
-                                            {Object.values(s.boards).map(b => (
-                                                <option key={b.id} value={b.id}>
-                                                    {b.name}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </label>
-
-                                    <label>
-                                        <input
-                                            type="checkbox"
-                                            checked={s.useGlobal}
-                                            onChange={e =>
-                                                a.setUseGlobal(e.target.checked)
-                                            }
-                                        />
-                                        Use global layout for this board
-                                    </label>
+                                            This board ({board.name})
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => changeScope("all")}
+                                            className={`rounded-xl border px-3 py-2.5 text-left text-xs font-bold transition-all ${
+                                                scope === "all"
+                                                    ? "border-[#B6D8FA] bg-[#DCEEFF] text-[#465365]"
+                                                    : "border-slate-200 bg-[#FFF9EC]/50 text-[#465365]/80 hover:bg-[#DCEEFF]/40"
+                                            }`}
+                                        >
+                                            All boards (global default)
+                                        </button>
+                                    </div>
+                                    {hasBoardOverride && scope === "all" && (
+                                        <p className="text-xs text-[#465365]">
+                                            Saving under All boards will remove the custom grid override on{" "}
+                                            <strong>{board.name}</strong>.
+                                        </p>
+                                    )}
                                 </div>
                             )}
-                        </div>
 
-                        <div className="settings-section">
-                            <label>Layout mode</label>
-
-                            <div className="filter-pills">
-                                <button
-                                    type="button"
-                                    aria-pressed={s.draftMode === "manual"}
-                                    disabled={s.scope === "board" && s.useGlobal}
-                                    onClick={() => a.setDraftMode("manual")}
-                                >
-                                    Manual
-                                </button>
-
-                                <button
-                                    type="button"
-                                    aria-pressed={s.draftMode === "automatic"}
-                                    disabled={s.scope === "board" && s.useGlobal}
-                                    onClick={() => a.setDraftMode("automatic")}
-                                >
-                                    Automatic
-                                </button>
-                            </div>
-                        </div>
-
-                        {s.draftMode === "manual" && (
-                            <>
-                                <div className="settings-section">
-                                    <label>Grid presets</label>
-
-                                    <div className="filter-pills">
-                                        {GRID_PRESETS.map(g => (
-                                            <button
-                                                type="button"
-                                                key={`${g.rows}:${g.cols}`}
-                                                aria-pressed={
-                                                    g.rows === s.draft.rows &&
-                                                    g.cols === s.draft.cols
-                                                }
-                                                disabled={
-                                                    s.scope === "board" &&
-                                                    s.useGlobal
-                                                }
-                                                title={
-                                                    g.rows <= 3
-                                                        ? "Emergent"
-                                                        : g.rows >= 8
-                                                            ? "Independent"
-                                                            : "Context-dependent / transitional"
-                                                }
-                                                onClick={() => a.setDraft(g)}
-                                            >
-                                                {g.rows}×{g.cols}
-                                            </button>
-                                        ))}
-                                    </div>
+                            <div className="space-y-2">
+                                <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                                    Layout mode
+                                </span>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => changeDraftMode("manual")}
+                                        className={`rounded-xl border px-3 py-2.5 text-left text-xs font-bold transition-all ${
+                                            draftMode === "manual"
+                                                ? "border-[#B6D8FA] bg-[#DCEEFF] text-[#465365]"
+                                                : "border-slate-200 bg-[#FFF9EC]/50 text-[#465365]/80 hover:bg-[#DCEEFF]/40"
+                                        }`}
+                                    >
+                                        Manual grid
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => changeDraftMode("automatic")}
+                                        className={`rounded-xl border px-3 py-2.5 text-left text-xs font-bold transition-all ${
+                                            draftMode === "automatic"
+                                                ? "border-[#B6D8FA] bg-[#DCEEFF] text-[#465365]"
+                                                : "border-slate-200 bg-[#FFF9EC]/50 text-[#465365]/80 hover:bg-[#DCEEFF]/40"
+                                        }`}
+                                    >
+                                        Automatic fit
+                                    </button>
                                 </div>
+                            </div>
 
-                                <div className="settings-section">
-                                    <div className="field-row">
-                                        <label>
-                                            Rows
-                                            <input
-                                                type="number"
-                                                min="1"
-                                                max="16"
-                                                disabled={
-                                                    s.scope === "board" &&
-                                                    s.useGlobal
-                                                }
-                                                value={s.draft.rows}
-                                                onChange={e =>
-                                                    a.setDraft({
-                                                        ...s.draft,
-                                                        rows: Number(e.target.value)
-                                                    })
-                                                }
-                                            />
-                                        </label>
-
-                                        <label>
-                                            Columns
-                                            <input
-                                                type="number"
-                                                min="1"
-                                                max="16"
-                                                disabled={
-                                                    s.scope === "board" &&
-                                                    s.useGlobal
-                                                }
-                                                value={s.draft.cols}
-                                                onChange={e =>
-                                                    a.setDraft({
-                                                        ...s.draft,
-                                                        cols: Number(e.target.value)
-                                                    })
-                                                }
-                                            />
-                                        </label>
+                            {!isAutomatic ? (
+                                <>
+                                    <div className="space-y-2">
+                                        <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                                            Grid presets
+                                        </span>
+                                        <div className="flex flex-wrap gap-2">
+                                            {GRID_PRESETS.map(preset => {
+                                                const active =
+                                                    draftGrid.rows === preset.rows &&
+                                                    draftGrid.cols === preset.cols;
+                                                return (
+                                                    <button
+                                                        key={`${preset.rows}x${preset.cols}`}
+                                                        type="button"
+                                                        onClick={() => changeDraftGrid(preset)}
+                                                        className={`rounded-xl border px-3 py-1.5 text-xs font-bold transition-all ${
+                                                            active
+                                                                ? "border-[#B6D8FA] bg-[#DCEEFF] text-[#465365]"
+                                                                : "border-slate-200 bg-white text-[#465365]/80 hover:bg-[#DCEEFF]/40"
+                                                        }`}
+                                                    >
+                                                        {preset.rows} × {preset.cols}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
                                     </div>
 
-                                    <button
-                                        type="button"
-                                        disabled={
-                                            s.scope === "board" && s.useGlobal
-                                        }
-                                        onClick={a.swapRowsCols}
-                                    >
-                                        ⇄ Swap orientation
-                                    </button>
-                                </div>
-
-                                <div className="settings-section">
-                                    <div
-                                        className="grid-preview"
-                                        aria-label={`${s.draft.rows} by ${s.draft.cols} layout preview`}
-                                        style={{
-                                            gridTemplateColumns:
-                                                `repeat(${s.draft.cols}, 1fr)`
-                                        }}
-                                    >
-                                        {s.preview.map((_, i) => (
-                                            <span key={i} />
-                                        ))}
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <Stepper
+                                            label="Rows"
+                                            value={draftGrid.rows}
+                                            min={GRID_LIMITS.minRows}
+                                            max={GRID_LIMITS.maxRows}
+                                            onChange={rows =>
+                                                changeDraftGrid({ ...draftGrid, rows })
+                                            }
+                                        />
+                                        <Stepper
+                                            label="Columns"
+                                            value={draftGrid.cols}
+                                            min={GRID_LIMITS.minCols}
+                                            max={GRID_LIMITS.maxCols}
+                                            onChange={cols =>
+                                                changeDraftGrid({ ...draftGrid, cols })
+                                            }
+                                        />
                                     </div>
 
-                                    <p>
-                                        {s.overflow} tiles will be repositioned if they fall
-                                        outside the new layout.
-                                    </p>
+                                    <div className="rounded-2xl border border-[#F0D382] bg-[#FFF9EC] p-4 text-xs text-[#465365]">
+                                        <p className="font-bold text-[#465365]">
+                                            Capacity: {draftGrid.rows * draftGrid.cols} slots per page ·
+                                            Estimated pages: {estimatedPages}
+                                        </p>
+                                        {outOfBoundsTiles > 0 && (
+                                            <div className="mt-2 flex items-center justify-between gap-2">
+                                                <span>
+                                                    {outOfBoundsTiles} tile(s) sit outside{" "}
+                                                    {draftGrid.rows} × {draftGrid.cols}.
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={reflowTiles}
+                                                    className="rounded-lg border border-[#F0D382] bg-[#FFE9A8] px-2.5 py-1 font-bold text-[#465365] hover:bg-[#FFE9A8]/80"
+                                                >
+                                                    Reflow now
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="rounded-2xl border border-slate-200 bg-[#FFF9EC] p-4 text-xs text-[#465365]">
+                                    Automatic mode fits all tiles on a single responsive page based on
+                                    your tile width and height percentages.
                                 </div>
-                            </>
-                        )}
+                            )}
+                        </>
+                    )}
 
-                        {s.draftMode === "automatic" && (
-                            <div className="settings-section">
-                                <p>
-                                    The board automatically adjusts its rows and columns
-                                    according to the available space, tile dimensions,
-                                    and grid gap.
-                                </p>
-                            </div>
-                        )}
-                    </fieldset>
-
-                    <fieldset disabled={!edit.state.isEditMode}>
-                        <legend>Tile appearance</legend>
-
-                        <div className="settings-section">
-                            <div className="tile-dimension-control">
-                                <label htmlFor="tile-width-input">
-                                    Tile width
-                                </label>
-
-                                <div className="tile-dimension-buttons">
-                                    <button
-                                        type="button"
-                                        aria-label="Decrease tile width"
-                                        disabled={widthUnits <= 1}
-                                        onClick={() =>
-                                            changeDimension("tileWidth", widthUnits - 1)
-                                        }
-                                    >
-                                        −
-                                    </button>
-
-                                    <input
-                                        id="tile-width-input"
-                                        className="tile-size-input"
-                                        type="text"
-                                        inputMode="numeric"
-                                        pattern="[0-9]*"
-                                        maxLength={3}
-                                        value={widthInput}
-                                        onChange={e =>
-                                            updateDimension(
-                                                "tileWidth",
-                                                e.target.value
-                                            )
-                                        }
-                                        onBlur={() =>
-                                            finishDimensionInput("tileWidth")
-                                        }
-                                        aria-label="Tile width percentage"
-                                    />
-
-                                    <span>%</span>
-
-                                    <button
-                                        type="button"
-                                        aria-label="Increase tile width"
-                                        disabled={widthUnits >= 100}
-                                        onClick={() =>
-                                            changeDimension("tileWidth", widthUnits + 1)
-                                        }
-                                    >
-                                        +
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="tile-dimension-control">
-                                <label htmlFor="tile-height-input">
-                                    Tile height
-                                </label>
-
-                                <div className="tile-dimension-buttons">
-                                    <button
-                                        type="button"
-                                        aria-label="Decrease tile height"
-                                        disabled={heightUnits <= 1}
-                                        onClick={() =>
-                                            changeDimension("tileHeight", heightUnits - 1)
-                                        }
-                                    >
-                                        −
-                                    </button>
-
-                                    <input
-                                        id="tile-height-input"
-                                        className="tile-size-input"
-                                        type="text"
-                                        inputMode="numeric"
-                                        pattern="[0-9]*"
-                                        maxLength={3}
-                                        value={heightInput}
-                                        onChange={e =>
-                                            updateDimension(
-                                                "tileHeight",
-                                                e.target.value
-                                            )
-                                        }
-                                        onBlur={() =>
-                                            finishDimensionInput("tileHeight")
-                                        }
-                                        aria-label="Tile height percentage"
-                                    />
-
-                                    <span>%</span>
-
-                                    <button
-                                        type="button"
-                                        aria-label="Increase tile height"
-                                        disabled={heightUnits >= 100}
-                                        onClick={() =>
-                                            changeDimension("tileHeight", heightUnits + 1)
-                                        }
-                                    >
-                                        +
-                                    </button>
-                                </div>
-                            </div>
-
-                            <label>
-                                Label position
-                                <select
-                                    value={s.appearance.labelPosition}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            labelPosition: e.target.value as "top" | "bottom"
-                                        })
-                                    }
-                                >
-                                    <option value="top">top</option>
-                                    <option value="bottom">bottom</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                Label size
-                                <select
-                                    value={s.appearance.fontScale}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            fontScale: e.target.value as "sm" | "md" | "lg"
-                                        })
-                                    }
-                                >
-                                    <option value="sm">sm</option>
-                                    <option value="md">md</option>
-                                    <option value="lg">lg</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                Icon size
-                                <select
-                                    value={s.appearance.iconScale}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            iconScale: e.target.value as "sm" | "md" | "lg"
-                                        })
-                                    }
-                                >
-                                    <option value="sm">sm</option>
-                                    <option value="md">md</option>
-                                    <option value="lg">lg</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                Grid gap
-                                <select
-                                    value={s.appearance.gridGap}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            gridGap: e.target.value as BoardData["tileAppearance"]["gridGap"]
-                                        })
-                                    }
-                                >
-                                    <option value="compact">compact</option>
-                                    <option value="normal">normal</option>
-                                    <option value="relaxed">relaxed</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                Colors
-                                <select
-                                    value={s.appearance.colorMode}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            colorMode: e.target.value as "catalog" | "wordClass"
-                                        })
-                                    }
-                                >
-                                    <option value="catalog">Catalog</option>
-                                    <option value="wordClass">Fitzgerald word class</option>
-                                </select>
-                            </label>
-
-                            <label>
-                                <input
-                                    type="checkbox"
-                                    checked={s.appearance.showIcons}
-                                    onChange={e =>
-                                        a.setAppearance({
-                                            ...s.appearance,
-                                            showIcons: e.target.checked
-                                        })
+                    {tab === "appearance" && (
+                        <div className="space-y-4">
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                <Segmented
+                                    label="Label position"
+                                    value={draftAppearance.labelPosition}
+                                    options={[
+                                        { label: "Bottom", value: "bottom" },
+                                        { label: "Top", value: "top" }
+                                    ]}
+                                    onChange={labelPosition =>
+                                        patchAppearance({ labelPosition })
                                     }
                                 />
-                                Show icons
-                            </label>
-                        </div>
-                    </fieldset>
+                                <Segmented
+                                    label="Show icons"
+                                    value={draftAppearance.showIcons ? "yes" : "no"}
+                                    options={[
+                                        { label: "Show", value: "yes" },
+                                        { label: "Hide", value: "no" }
+                                    ]}
+                                    onChange={v => patchAppearance({ showIcons: v === "yes" })}
+                                />
+                            </div>
 
-                    <div className="settings-section">
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                <Segmented
+                                    label="Text size"
+                                    value={draftAppearance.fontScale}
+                                    options={[
+                                        { label: "Small", value: "sm" },
+                                        { label: "Medium", value: "md" },
+                                        { label: "Large", value: "lg" }
+                                    ]}
+                                    onChange={fontScale => patchAppearance({ fontScale })}
+                                />
+                                <Segmented
+                                    label="Icon size"
+                                    value={draftAppearance.iconScale}
+                                    options={[
+                                        { label: "Small", value: "sm" },
+                                        { label: "Medium", value: "md" },
+                                        { label: "Large", value: "lg" }
+                                    ]}
+                                    onChange={iconScale => patchAppearance({ iconScale })}
+                                />
+                            </div>
+
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                <Segmented
+                                    label="Grid spacing"
+                                    value={draftAppearance.gridGap}
+                                    options={[
+                                        { label: "Compact", value: "compact" },
+                                        { label: "Normal", value: "normal" },
+                                        { label: "Relaxed", value: "relaxed" }
+                                    ]}
+                                    onChange={gridGap => patchAppearance({ gridGap })}
+                                />
+                            </div>
+
+                            <div className="grid gap-4 sm:grid-cols-2">
+                                <DimensionSlider
+                                    label="Tile width"
+                                    value={draftAppearance.tileWidth}
+                                    onChange={tileWidth => patchAppearance({ tileWidth })}
+                                />
+                                <DimensionSlider
+                                    label="Tile height"
+                                    value={draftAppearance.tileHeight}
+                                    onChange={tileHeight => patchAppearance({ tileHeight })}
+                                />
+                            </div>
+                        </div>
+                    )}
+
+                    {tab === "colorSystem" && (
+                        <div className="space-y-5">
+                            <div className="space-y-2">
+                                <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                                    Color Coding System
+                                </span>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {(Object.keys(COLOR_SYSTEMS) as ColorSystemId[]).map(
+                                        systemId => {
+                                            const active = draftColorSystem === systemId;
+                                            return (
+                                                <button
+                                                    key={systemId}
+                                                    type="button"
+                                                    onClick={() => changeDraftColorSystem(systemId)}
+                                                    className={`rounded-xl border px-3 py-2.5 text-center text-xs font-bold transition-all ${
+                                                        active
+                                                            ? "border-[#B6D8FA] bg-[#DCEEFF] text-[#465365] shadow-sm"
+                                                            : "border-slate-200 bg-[#FFF9EC]/50 text-[#465365]/80 hover:bg-[#DCEEFF]/40"
+                                                    }`}
+                                                >
+                                                    {COLOR_SYSTEMS[systemId].label}
+                                                </button>
+                                            );
+                                        }
+                                    )}
+                                </div>
+                                <p className="text-xs leading-relaxed text-[#465365]/75">
+                                    {draftColorSystem === "custom"
+                                        ? "Create and customize your own catalogs, tile colors, and word-class schemes."
+                                        : "Uses standard AAC color-coded catalogs. Your Custom Colors layout stays preserved. Click Save changes to apply."}
+                                </p>
+                            </div>
+
+                            <div className="space-y-3">
+                                <Segmented
+                                    label="Tile color mode"
+                                    value={draftAppearance.colorMode}
+                                    disabled={draftColorSystem !== "custom"}
+                                    options={[
+                                        { label: "Catalog", value: "catalog" },
+                                        { label: "Word class", value: "wordClass" }
+                                    ]}
+                                    onChange={colorMode => patchAppearance({ colorMode })}
+                                />
+                            </div>
+                        </div>
+                    )}
+
+                    {tab === "speech" && (
+                        <div className="space-y-4">
+                            <div className="space-y-1.5">
+                                <div className="flex items-center justify-between">
+                                    <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                                        Speech volume
+                                    </span>
+                                    <span className="text-xs font-bold text-[#465365]">
+                                        {Math.round(draftSpeech.volume * 100)}%
+                                    </span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.05}
+                                    value={draftSpeech.volume}
+                                    onChange={e =>
+                                        patchSpeech({ volume: Number(e.target.value) })
+                                    }
+                                    className="w-full accent-[#465365]"
+                                />
+                            </div>
+
+                            <Segmented
+                                label="Speak tile when tapped"
+                                value={draftSpeech.speakOnTap ? "yes" : "no"}
+                                options={[
+                                    { label: "Enabled", value: "yes" },
+                                    { label: "Silent", value: "no" }
+                                ]}
+                                onChange={v => patchSpeech({ speakOnTap: v === "yes" })}
+                            />
+
+                            <Segmented
+                                label="Auto-clear sentence strip"
+                                value={draftSpeech.autoClear}
+                                options={[
+                                    { label: "Off", value: "off" },
+                                    { label: "After speak", value: "afterSpeak" },
+                                    { label: "On next tap", value: "nextTap" }
+                                ]}
+                                onChange={autoClear => patchSpeech({ autoClear })}
+                            />
+                        </div>
+                    )}
+
+                    {tab === "access" && (
+                        <div className="space-y-5">
+                            <div className="space-y-2">
+                                <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                                    Edit mode PIN
+                                </span>
+                                {draftAccess.editPin ? (
+                                    <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-[#FFF9EC] px-4 py-3">
+                                        <span className="text-xs font-bold text-[#465365]">
+                                            4-digit PIN protection is active
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={removePin}
+                                            className="rounded-xl border border-[#F2C4B1] bg-[#FFDFD1] px-3 py-1.5 text-xs font-bold text-[#465365] hover:bg-[#FFDFD1]/80"
+                                        >
+                                            Remove PIN
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="password"
+                                            inputMode="numeric"
+                                            maxLength={4}
+                                            value={pinInput}
+                                            onChange={e =>
+                                                setPinInput(e.target.value.replace(/\D/g, ""))
+                                            }
+                                            placeholder="Enter 4-digit PIN"
+                                            className="h-11 flex-1 rounded-xl border border-slate-200 px-3 text-sm font-semibold text-[#465365] focus:border-[#B6D8FA] focus:outline-none"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={savePin}
+                                            className="h-11 rounded-xl border border-[#B6D8FA] bg-[#DCEEFF] px-4 text-xs font-bold text-[#465365] hover:bg-[#C6E2FF]"
+                                        >
+                                            Set PIN
+                                        </button>
+                                    </div>
+                                )}
+                                {pinError && (
+                                    <p className="text-xs font-semibold text-[#465365]">
+                                        {pinError}
+                                    </p>
+                                )}
+                            </div>
+
+                            <Segmented
+                                label="Long-press tile to edit"
+                                value={draftAccess.longPressToEdit ? "yes" : "no"}
+                                options={[
+                                    { label: "Enabled", value: "yes" },
+                                    { label: "Disabled", value: "no" }
+                                ]}
+                                onChange={v =>
+                                    patchAccess({ longPressToEdit: v === "yes" })
+                                }
+                            />
+
+                            <div className="grid gap-4 sm:grid-cols-3">
+                                <Stepper
+                                    label="Hold (ms)"
+                                    value={draftAccess.holdDurationMs}
+                                    min={250}
+                                    max={2000}
+                                    step={50}
+                                    onChange={holdDurationMs =>
+                                        patchAccess({ holdDurationMs })
+                                    }
+                                />
+                                <Stepper
+                                    label="Tolerance (px)"
+                                    value={draftAccess.moveTolerancePx}
+                                    min={4}
+                                    max={40}
+                                    step={2}
+                                    onChange={moveTolerancePx =>
+                                        patchAccess({ moveTolerancePx })
+                                    }
+                                />
+                                <Stepper
+                                    label="Swipe (px)"
+                                    value={draftAccess.swipeThresholdPx}
+                                    min={20}
+                                    max={150}
+                                    step={5}
+                                    onChange={swipeThresholdPx =>
+                                        patchAccess({ swipeThresholdPx })
+                                    }
+                                />
+                            </div>
+
+                            <div className="rounded-2xl border border-[#F2C4B1] bg-[#FFDFD1]/50 p-4">
+                                <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                        <p className="font-nunito text-xs font-extrabold text-[#465365]">
+                                            Reset board data
+                                        </p>
+                                        <p className="mt-0.5 text-xs text-[#465365]/80">
+                                            Restores default catalogs, vocabulary, and grid settings.
+                                        </p>
+                                    </div>
+                                    {!confirmReset ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => setConfirmReset(true)}
+                                            className="inline-flex items-center gap-1.5 rounded-xl border border-[#F2C4B1] bg-white px-3 py-2 text-xs font-bold text-[#465365] hover:bg-[#FFDFD1]"
+                                        >
+                                            <RotateCcw className="h-3.5 w-3.5" />
+                                            Reset
+                                        </button>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={resetEverything}
+                                            className="inline-flex items-center gap-1.5 rounded-xl border border-[#F2C4B1] bg-[#FFDFD1] px-3 py-2 text-xs font-bold text-[#465365] hover:bg-[#FFDFD1]/80"
+                                        >
+                                            <AlertTriangle className="h-3.5 w-3.5" />
+                                            Confirm reset
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                <div className="flex items-center justify-between border-t border-slate-200 bg-[#FFF9EC] px-6 py-4">
+                    <span className="text-xs font-bold text-[#465365]">
+                        {savedNotice ? "Settings saved" : ""}
+                    </span>
+                    <div className="flex items-center gap-2">
                         <button
                             type="button"
-                            className="primary"
-                            disabled={!edit.state.isEditMode}
-                            onClick={a.apply}
+                            onClick={onClose}
+                            className="h-11 rounded-xl border border-slate-200 bg-white px-4 text-sm font-bold text-[#465365]/80 hover:bg-slate-50"
                         >
-                            Apply Changes
+                            Cancel
                         </button>
-
-                        {s.saved && <p role="status">Changes saved</p>}
-                    </div>
-                </>
-            )}
-
-            {initialTab === "speech" && (
-                <fieldset disabled={!edit.state.isEditMode}>
-                    <legend>Speech & access</legend>
-
-                    <div className="settings-section">
-                        <label>
-                            <input
-                                type="checkbox"
-                                checked={s.speech.speakOnTap}
-                                onChange={e =>
-                                    a.setSpeech({ speakOnTap: e.target.checked })
-                                }
-                            />
-                            Speak words on tap
-                        </label>
-
-                        <label>
-                            Sentence auto-clear
-                            <select
-                                value={s.speech.autoClear}
-                                onChange={e =>
-                                    a.setSpeech({
-                                        autoClear: e.target.value as BoardData["speechConfig"]["autoClear"]
-                                    })
-                                }
-                            >
-                                <option value="off">Keep until cleared</option>
-                                <option value="afterSpeak">Clear after speaking</option>
-                                <option value="nextTap">
-                                    Clear on next activation after speaking
-                                </option>
-                            </select>
-                        </label>
-
-                        <label>
-                            <input
-                                type="checkbox"
-                                checked={s.access.longPressToEdit}
-                                onChange={e =>
-                                    a.setAccess({ longPressToEdit: e.target.checked })
-                                }
-                            />
-                            Long press to edit
-                        </label>
-
-                        <label>
-                            Hold duration: {s.access.holdDurationMs} ms
-                            <input
-                                type="range"
-                                min="300"
-                                max="2000"
-                                step="50"
-                                value={s.access.holdDurationMs}
-                                onChange={e =>
-                                    a.setAccess({
-                                        holdDurationMs: Number(e.target.value)
-                                    })
-                                }
-                            />
-                        </label>
-
-                        <label>
-                            Movement tolerance: {s.access.moveTolerancePx} px
-                            <input
-                                type="range"
-                                min="4"
-                                max="50"
-                                value={s.access.moveTolerancePx}
-                                onChange={e =>
-                                    a.setAccess({
-                                        moveTolerancePx: Number(e.target.value)
-                                    })
-                                }
-                            />
-                        </label>
-
-                        <label>
-                            Swipe threshold: {s.access.swipeThresholdPx ?? 60} px
-                            <input
-                                type="range"
-                                min="30"
-                                max="160"
-                                value={s.access.swipeThresholdPx ?? 60}
-                                onChange={e =>
-                                    a.setAccess({
-                                        swipeThresholdPx: Number(e.target.value)
-                                    })
-                                }
-                            />
-                        </label>
-
-                        <label>
-                            Edit PIN (empty disables lock)
-                            <input
-                                type="password"
-                                autoComplete="new-password"
-                                value={s.pin}
-                                onChange={e => a.setPin(e.target.value)}
-                            />
-                        </label>
-
-                        <button type="button" onClick={a.savePin}>
-                            Save PIN
+                        <button
+                            type="button"
+                            onClick={handleSave}
+                            className="inline-flex h-11 items-center gap-1.5 rounded-xl border border-[#B6D8FA] bg-[#DCEEFF] px-5 text-sm font-bold text-[#465365] hover:bg-[#C6E2FF]"
+                        >
+                            <Check className="h-4 w-4" />
+                            Save changes
                         </button>
-
-                        {s.pinSaved && <p role="status">PIN settings saved</p>}
                     </div>
-                </fieldset>
-            )}
+                </div>
+            </div>
+        </div>
+    );
+}
 
-            {!edit.state.isEditMode && (
-                <p>
-                    Enable{" "}
-                    <button onClick={edit.actions.enter}>Edit mode</button>{" "}
-                    to change settings.
-                </p>
-            )}
-        </Modal>
+function Stepper({
+    label,
+    value,
+    min,
+    max,
+    step = 1,
+    onChange
+}: {
+    label: string;
+    value: number;
+    min: number;
+    max: number;
+    step?: number;
+    onChange: (value: number) => void;
+}) {
+    return (
+        <div className="space-y-1.5">
+            <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                {label}
+            </span>
+            <div className="flex h-11 items-center justify-between rounded-xl border border-slate-200 bg-white px-2">
+                <button
+                    type="button"
+                    onClick={() => onChange(Math.max(min, value - step))}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg text-sm font-bold text-[#465365] hover:bg-[#DCEEFF]/50"
+                >
+                    -
+                </button>
+                <span className="text-sm font-bold text-[#465365]">{value}</span>
+                <button
+                    type="button"
+                    onClick={() => onChange(Math.min(max, value + step))}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg text-sm font-bold text-[#465365] hover:bg-[#DCEEFF]/50"
+                >
+                    +
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function DimensionSlider({
+    label,
+    value,
+    onChange
+}: {
+    label: string;
+    value: number;
+    onChange: (value: number) => void;
+}) {
+    return (
+        <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+                <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                    {label}
+                </span>
+                <span className="text-xs font-bold text-[#465365]">{value}%</span>
+            </div>
+            <input
+                type="range"
+                min={1}
+                max={100}
+                step={1}
+                value={value}
+                onChange={e => onChange(Number(e.target.value))}
+                className="w-full accent-[#465365]"
+            />
+        </div>
+    );
+}
+
+function Segmented<T extends string>({
+    label,
+    value,
+    options,
+    disabled = false,
+    onChange
+}: {
+    label: string;
+    value: T;
+    options: { label: string; value: T }[];
+    disabled?: boolean;
+    onChange: (value: T) => void;
+}) {
+    return (
+        <div className="space-y-1.5">
+            <span className="font-nunito text-[11px] font-bold uppercase tracking-wider text-[#465365]/70">
+                {label}
+            </span>
+            <div
+                className="grid gap-1.5 rounded-xl bg-[#FFF9EC] border border-slate-200/70 p-1"
+                style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
+            >
+                {options.map(option => {
+                    const active = option.value === value;
+                    const stateClasses = active
+                        ? "border border-[#B6D8FA] bg-[#DCEEFF] text-[#465365] shadow-sm"
+                        : "text-[#465365]/75 hover:text-[#465365] hover:bg-white/60";
+                    return (
+                        <button
+                            key={option.value}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => {
+                                if (!disabled) onChange(option.value);
+                            }}
+                            className={`rounded-lg py-2 text-xs font-bold transition-all ${stateClasses} ${
+                                disabled ? "cursor-not-allowed opacity-50" : ""
+                            }`}
+                        >
+                            {option.label}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
     );
 }

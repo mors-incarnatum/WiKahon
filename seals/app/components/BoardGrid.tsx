@@ -1,6 +1,4 @@
-
 "use client";
-
 import type { CSSProperties } from "react";
 import { useEffect, useRef } from "react";
 import { useBoardGridViewModel } from "@/viewmodels/useBoardGridViewModel";
@@ -9,9 +7,7 @@ import TileButton from "./TileButton";
 import TileActionMenu from "./TileActionMenu";
 import TileEditor from "./TileEditor";
 
-export default function BoardGrid({ boardId }: {
-    boardId: string;
-}) {
+export default function BoardGrid({ boardId }: { boardId: string }) {
     const { state: s, actions: a } = useBoardGridViewModel(boardId);
     const edit = useEditContext();
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -24,8 +20,6 @@ export default function BoardGrid({ boardId }: {
         "--tile-height-scale": tileHeight / 50
     } as CSSProperties;
 
-    // Measure the available grid area so enlarged tiles can reduce
-    // the effective number of rows and columns.
     useEffect(() => {
         const container = scrollRef.current;
 
@@ -61,7 +55,7 @@ export default function BoardGrid({ boardId }: {
             observer.observe(grid);
 
         return () => observer.disconnect();
-    }, [s.appearance.gridGap, s.rows, s.cols]);
+    }, [s.appearance.gridGap, s.rows, s.cols, a]);
 
     return (
         <>
@@ -127,11 +121,6 @@ export default function BoardGrid({ boardId }: {
                                     moving={
                                         s.moving === c.key &&
                                         s.movingPage === p.page
-                                    }
-                                    color={
-                                        s.boards[
-                                            c.tile?.categoryId ?? ""
-                                        ]?.colorKey ?? "slate"
                                     }
                                     appearance={s.appearance}
                                     onEdit={() => a.open(c.key, p.page)}

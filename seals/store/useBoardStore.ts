@@ -5,6 +5,9 @@ import {
     CATEGORIES,
     INITIAL_DICTIONARY,
     DEFAULT_GRID,
+    MODIFIED_FITZGERALD_CATALOGS,
+    TOBII_DYNAVOX_CATALOGS,
+    resolveTileColorKey,
     cellKey,
     clampGrid,
     uid,
@@ -14,13 +17,18 @@ import {
     type CellKey,
     type SentenceToken,
     type ColorKey,
-    type WordTile
+    type WordTile,
+    type ColorSystemId,
+    type ColorSystemConfig,
+    type TileSystemAssignment
 } from "@/lib/board";
 
 export interface BoardData {
     tiles: Record<string, Tile>;
     boards: Record<string, CatalogBoard>;
     catalogOrder: string[];
+    colorSystem: ColorSystemId;
+    colorSystemConfigs: Partial<Record<ColorSystemId, ColorSystemConfig>>;
     gridConfig: GridConfig;
     layoutMode: "manual" | "automatic";
     tileAppearance: {
@@ -49,6 +57,7 @@ export interface BoardData {
 }
 
 export interface BoardState extends BoardData {
+    setColorSystem: (system: ColorSystemId) => void;
     setGridConfig: (grid: GridConfig, boardId?: string) => void;
     applyBoardSettings: (
         grid: GridConfig,
@@ -104,6 +113,92 @@ function normalizeAppearance(
     };
 }
 
+function stripSharedTileFields(tile: Tile): Tile {
+    return {
+        id: tile.id,
+        kind: tile.kind,
+        label: tile.label,
+        ...(tile.spokenText !== undefined ? { spokenText: tile.spokenText } : {}),
+        iconName: tile.iconName,
+        ...(tile.isCustom ? { isCustom: true } : {})
+    };
+}
+
+function sanitizeSharedTiles(tiles: Record<string, Tile>): Record<string, Tile> {
+    const clean: Record<string, Tile> = {};
+    for (const [id, tile] of Object.entries(tiles)) {
+        clean[id] = stripSharedTileFields(tile);
+    }
+    return clean;
+}
+
+function buildAssignmentsFromTiles(
+    tiles: Record<string, Tile>
+): Record<string, TileSystemAssignment> {
+    const assignments: Record<string, TileSystemAssignment> = {};
+    for (const tile of Object.values(tiles)) {
+        assignments[tile.id] = {
+            categoryId: tile.categoryId ?? "home",
+            ...(tile.targetBoardId !== undefined ? { targetBoardId: tile.targetBoardId } : {}),
+            ...(tile.colorKey !== undefined ? { colorKey: tile.colorKey } : {}),
+            ...(tile.wordClass !== undefined ? { wordClass: tile.wordClass } : {})
+        };
+    }
+    return assignments;
+}
+
+export function createPresetSystemConfig(
+    system: Exclude<ColorSystemId, "custom">
+): ColorSystemConfig {
+    const specs =
+        system === "modifiedFitzgerald"
+            ? MODIFIED_FITZGERALD_CATALOGS
+            : TOBII_DYNAVOX_CATALOGS;
+
+    const boards: Record<string, CatalogBoard> = {};
+    const catalogOrder: string[] = [];
+
+    for (const spec of specs) {
+        boards[spec.id] = {
+            id: spec.id,
+            name: spec.name,
+            shortName: spec.shortName,
+            colorKey: spec.colorKey,
+            iconName: spec.iconName,
+            isBuiltIn: true,
+            pages: [{ cells: {} }]
+        };
+        catalogOrder.push(spec.id);
+    }
+
+    boards.home = {
+        id: "home",
+        name: "Home",
+        shortName: "Home",
+        colorKey: "slate",
+        iconName: null,
+        isBuiltIn: true,
+        pages: [{ cells: {} }]
+    };
+
+    return {
+        boards,
+        catalogOrder,
+        tileAssignments: {},
+        initialized: true
+    };
+}
+
+function syncActiveConfig(d: BoardData) {
+    const existing = d.colorSystemConfigs[d.colorSystem];
+    d.colorSystemConfigs[d.colorSystem] = {
+        boards: structuredClone(d.boards),
+        catalogOrder: [...d.catalogOrder],
+        tileAssignments: structuredClone(existing?.tileAssignments ?? {}),
+        initialized: true
+    };
+}
+
 export function initialData(): BoardData {
     const tiles: Record<string, Tile> = {};
     const boards: Record<string, CatalogBoard> = {};
@@ -147,10 +242,21 @@ export function initialData(): BoardData {
         pages: [{ cells }]
     };
 
+    const customConfig: ColorSystemConfig = {
+        boards: structuredClone(boards),
+        catalogOrder: [...CATEGORY_IDS],
+        tileAssignments: buildAssignmentsFromTiles(tiles),
+        initialized: true
+    };
+
     return {
-        tiles,
+        tiles: sanitizeSharedTiles(tiles),
         boards,
         catalogOrder: [...CATEGORY_IDS],
+        colorSystem: "custom",
+        colorSystemConfigs: {
+            custom: customConfig
+        },
         gridConfig: { ...DEFAULT_GRID },
         layoutMode: "manual",
         tileAppearance: {
@@ -193,8 +299,11 @@ export function migrateV1(value: unknown): BoardData {
     if (!old || typeof old !== "object")
         return data;
 
+    const rawTiles: Record<string, Tile> = { ...data.tiles };
+
     const convert = (word: WordTile) => {
-        data.tiles[word.id] = { ...word, kind: "word" };
+        rawTiles[word.id] = { ...word, kind: "word" };
+        data.tiles[word.id] = stripSharedTileFields(rawTiles[word.id]);
         return { tileId: word.id };
     };
 
@@ -221,7 +330,71 @@ export function migrateV1(value: unknown): BoardData {
         });
     }
 
+    data.colorSystemConfigs.custom = {
+        boards: structuredClone(data.boards),
+        catalogOrder: [...data.catalogOrder],
+        tileAssignments: buildAssignmentsFromTiles(rawTiles),
+        initialized: true
+    };
+
     return data;
+}
+
+export function migrateBoardData(value: unknown, version?: number): BoardData {
+    if (!value || typeof value !== "object")
+        return initialData();
+
+    const candidate = value as Partial<BoardData> & {
+        dictionary?: Record<string, (WordTile | null)[]>;
+        homeGrid?: { slotIndex: number; tile: WordTile | null }[];
+    };
+
+    if ((version !== undefined && version < 2) || ("dictionary" in candidate && !candidate.boards)) {
+        return migrateBoardData(migrateV1(value), 3);
+    }
+
+    const base = initialData();
+    const boards = candidate.boards ?? base.boards;
+    const catalogOrder = candidate.catalogOrder ?? base.catalogOrder;
+    const rawTiles = candidate.tiles ?? base.tiles;
+
+    const existingConfigs = candidate.colorSystemConfigs
+        ? structuredClone(candidate.colorSystemConfigs)
+        : {};
+
+    if (!existingConfigs.custom?.initialized) {
+        existingConfigs.custom = {
+            boards: structuredClone(boards),
+            catalogOrder: [...catalogOrder],
+            tileAssignments: buildAssignmentsFromTiles(rawTiles),
+            initialized: true
+        };
+    }
+
+    const activeSystem: ColorSystemId =
+        version !== undefined && version >= 3 && candidate.colorSystem
+            ? candidate.colorSystem
+            : "custom";
+
+    if (activeSystem !== "custom" && !existingConfigs[activeSystem]?.initialized) {
+        existingConfigs[activeSystem] = createPresetSystemConfig(activeSystem);
+    }
+
+    const activeConfig = existingConfigs[activeSystem]!;
+
+    return {
+        ...base,
+        ...candidate,
+        tiles: sanitizeSharedTiles(rawTiles),
+        boards: structuredClone(activeConfig.boards),
+        catalogOrder: [...activeConfig.catalogOrder],
+        colorSystem: activeSystem,
+        colorSystemConfigs: existingConfigs,
+        tileAppearance: normalizeAppearance({
+            ...base.tileAppearance,
+            ...(candidate.tileAppearance ?? {})
+        })
+    };
 }
 
 function addToBoard(data: BoardData, id: string, tileIds: string[]) {
@@ -329,6 +502,8 @@ export const createBoardStore = () =>
                         tiles: state.tiles,
                         boards: state.boards,
                         catalogOrder: state.catalogOrder,
+                        colorSystem: state.colorSystem,
+                        colorSystemConfigs: state.colorSystemConfigs,
                         gridConfig: state.gridConfig,
                         layoutMode: state.layoutMode,
                         tileAppearance: state.tileAppearance,
@@ -338,11 +513,40 @@ export const createBoardStore = () =>
                     });
 
                     fn(data);
+                    syncActiveConfig(data);
                     return data;
                 });
 
             return {
                 ...initialData(),
+
+                setColorSystem: nextSystem =>
+                    mutate(d => {
+                        if (d.colorSystem === nextSystem)
+                            return;
+
+                        syncActiveConfig(d);
+
+                        let target = d.colorSystemConfigs[nextSystem];
+
+                        if (!target || !target.initialized) {
+                            target =
+                                nextSystem === "custom"
+                                    ? {
+                                          boards: structuredClone(d.boards),
+                                          catalogOrder: [...d.catalogOrder],
+                                          tileAssignments: buildAssignmentsFromTiles(d.tiles),
+                                          initialized: true
+                                      }
+                                    : createPresetSystemConfig(nextSystem);
+
+                            d.colorSystemConfigs[nextSystem] = structuredClone(target);
+                        }
+
+                        d.colorSystem = nextSystem;
+                        d.boards = structuredClone(target.boards);
+                        d.catalogOrder = [...target.catalogOrder];
+                    }),
 
                 setGridConfig: (grid, id) => mutate(d => {
                     if (id && d.boards[id])
@@ -421,12 +625,25 @@ export const createBoardStore = () =>
                             return state;
                         }
 
+                        const nextBoards = {
+                            ...state.boards,
+                            [id]: {
+                                ...board,
+                                pages: nextPages
+                            }
+                        };
+
+                        const activeCfg = state.colorSystemConfigs[state.colorSystem];
+
                         return {
-                            boards: {
-                                ...state.boards,
-                                [id]: {
-                                    ...board,
-                                    pages: nextPages
+                            boards: nextBoards,
+                            colorSystemConfigs: {
+                                ...state.colorSystemConfigs,
+                                [state.colorSystem]: {
+                                    boards: nextBoards,
+                                    catalogOrder: activeCfg?.catalogOrder ?? state.catalogOrder,
+                                    tileAssignments: activeCfg?.tileAssignments ?? {},
+                                    initialized: true
                                 }
                             }
                         };
@@ -457,22 +674,30 @@ export const createBoardStore = () =>
                     })),
 
                 appendSentenceTile: tile =>
-                    set(s => ({
-                        sentence: [
-                            ...s.sentence,
-                            {
-                                instanceId: uid(),
-                                tileId: tile.id,
-                                label: tile.label,
-                                spokenText: tile.spokenText || tile.label,
-                                iconName: tile.iconName,
-                                colorKey:
-                                    tile.colorKey ??
-                                    s.boards[tile.categoryId]?.colorKey ??
-                                    "slate"
-                            }
-                        ]
-                    })),
+                    set(s => {
+                        const assignment =
+                            s.colorSystemConfigs[s.colorSystem]?.tileAssignments[tile.id];
+
+                        return {
+                            sentence: [
+                                ...s.sentence,
+                                {
+                                    instanceId: uid(),
+                                    tileId: tile.id,
+                                    label: tile.label,
+                                    spokenText: tile.spokenText || tile.label,
+                                    iconName: tile.iconName,
+                                    colorKey: resolveTileColorKey(
+                                        tile,
+                                        assignment,
+                                        s.boards,
+                                        s.colorSystem,
+                                        s.tileAppearance.colorMode
+                                    )
+                                }
+                            ]
+                        };
+                    }),
 
                 removeSentenceTokenAt: i =>
                     set(s => ({
@@ -487,12 +712,51 @@ export const createBoardStore = () =>
                 clearSentence: () => set({ sentence: [] }),
 
                 upsertTile: tile =>
-                    set(s => ({
-                        tiles: {
-                            ...s.tiles,
-                            [tile.id]: tile
+                    mutate(d => {
+                        const existing = d.tiles[tile.id];
+
+                        d.tiles[tile.id] = stripSharedTileFields({
+                            ...existing,
+                            ...tile,
+                            isCustom: existing?.isCustom ?? tile.isCustom
+                        });
+
+                        const cfg = d.colorSystemConfigs[d.colorSystem];
+                        if (cfg) {
+                            const prev = cfg.tileAssignments[tile.id];
+                            const nextCategoryId =
+                                tile.categoryId !== undefined
+                                    ? tile.categoryId
+                                    : prev?.categoryId ?? "home";
+                            const nextTargetBoardId =
+                                "targetBoardId" in tile
+                                    ? tile.targetBoardId
+                                    : prev?.targetBoardId;
+                            const nextColorKey =
+                                d.colorSystem === "custom"
+                                    ? "colorKey" in tile
+                                        ? tile.colorKey
+                                        : prev?.colorKey
+                                    : undefined;
+                            const nextWordClass =
+                                "wordClass" in tile
+                                    ? tile.wordClass
+                                    : prev?.wordClass;
+
+                            cfg.tileAssignments[tile.id] = {
+                                categoryId: nextCategoryId,
+                                ...(nextTargetBoardId !== undefined
+                                    ? { targetBoardId: nextTargetBoardId }
+                                    : {}),
+                                ...(nextColorKey !== undefined
+                                    ? { colorKey: nextColorKey }
+                                    : {}),
+                                ...(nextWordClass !== undefined
+                                    ? { wordClass: nextWordClass }
+                                    : {})
+                            };
                         }
-                    })),
+                    }),
 
                 assignSlot: (id, page, key, tileId) =>
                     mutate(d => {
@@ -504,10 +768,21 @@ export const createBoardStore = () =>
                         while (b.pages.length <= page)
                             b.pages.push({ cells: {} });
 
-                        if (tileId)
+                        if (tileId) {
                             b.pages[page].cells[key] = { tileId };
-                        else
+
+                            const cfg = d.colorSystemConfigs[d.colorSystem];
+                            if (cfg && id !== "home") {
+                                const existing = cfg.tileAssignments[tileId];
+                                cfg.tileAssignments[tileId] = {
+                                    ...existing,
+                                    categoryId: id,
+                                    ...(d.colorSystem !== "custom" ? { colorKey: undefined } : {})
+                                };
+                            }
+                        } else {
                             delete b.pages[page].cells[key];
+                        }
                     }),
 
                 swapSlots: (id, page, from, to) =>
@@ -539,6 +814,9 @@ export const createBoardStore = () =>
                     }),
 
                 createCatalog: input => {
+                    if (get().colorSystem !== "custom")
+                        return "";
+
                     const id = `cat-${uid()}`;
 
                     mutate(d => {
@@ -568,13 +846,21 @@ export const createBoardStore = () =>
                         if (!d.boards[id])
                             return;
 
+                        if (d.colorSystem !== "custom") {
+                            if (patch.gridOverride !== undefined)
+                                d.boards[id].gridOverride = patch.gridOverride;
+                            return;
+                        }
+
                         Object.assign(d.boards[id], patch);
 
                         for (const tile of Object.values(d.tiles)) {
-                            if (
-                                tile.kind !== "folder" ||
-                                tile.targetBoardId !== id
-                            )
+                            const assignment =
+                                d.colorSystemConfigs.custom?.tileAssignments[tile.id];
+                            const targetId =
+                                assignment?.targetBoardId ?? tile.targetBoardId;
+
+                            if (tile.kind !== "folder" || targetId !== id)
                                 continue;
 
                             if (patch.name !== undefined)
@@ -587,6 +873,9 @@ export const createBoardStore = () =>
 
                 deleteCatalog: id =>
                     mutate(d => {
+                        if (d.colorSystem !== "custom")
+                            return;
+
                         if (!d.boards[id] || d.boards[id].isBuiltIn)
                             return;
 
@@ -595,13 +884,17 @@ export const createBoardStore = () =>
                             c => c !== id
                         );
 
+                        const cfg = d.colorSystemConfigs.custom;
                         const folderIds = new Set(
                             Object.values(d.tiles)
-                                .filter(
-                                    t =>
-                                        t.kind === "folder" &&
-                                        t.targetBoardId === id
-                                )
+                                .filter(t => {
+                                    if (t.kind !== "folder")
+                                        return false;
+                                    const targetId =
+                                        cfg?.tileAssignments[t.id]?.targetBoardId ??
+                                        t.targetBoardId;
+                                    return targetId === id;
+                                })
                                 .map(t => t.id)
                         );
 
@@ -615,10 +908,13 @@ export const createBoardStore = () =>
 
                         folderIds.forEach(k => delete d.tiles[k]);
 
-                        Object.values(d.tiles).forEach(t => {
-                            if (t.categoryId === id)
-                                t.categoryId = "home";
-                        });
+                        if (cfg) {
+                            folderIds.forEach(k => delete cfg.tileAssignments[k]);
+                            Object.values(cfg.tileAssignments).forEach(a => {
+                                if (a.categoryId === id)
+                                    a.categoryId = "home";
+                            });
+                        }
                     }),
 
                 reorderCatalog: (id, direction) =>
@@ -642,7 +938,23 @@ export const createBoardStore = () =>
                     }),
 
                 addWordsToCatalog: (id, ids) =>
-                    mutate(d => addToBoard(d, id, ids)),
+                    mutate(d => {
+                        addToBoard(d, id, ids);
+
+                        const cfg = d.colorSystemConfigs[d.colorSystem];
+                        if (cfg && d.boards[id]) {
+                            for (const tileId of ids) {
+                                if (!d.tiles[tileId])
+                                    continue;
+                                const existing = cfg.tileAssignments[tileId];
+                                cfg.tileAssignments[tileId] = {
+                                    ...existing,
+                                    categoryId: id,
+                                    ...(d.colorSystem !== "custom" ? { colorKey: undefined } : {})
+                                };
+                            }
+                        }
+                    }),
 
                 placeFolderOnHome: id =>
                     mutate(d => {
@@ -653,21 +965,30 @@ export const createBoardStore = () =>
 
                         const tileId = `folder-${id}`;
 
-                        d.tiles[tileId] = {
-                            id: tileId,
-                            kind: "folder",
-                            label: b.name,
-                            categoryId: id,
-                            targetBoardId: id,
-                            iconName: b.iconName
-                        };
+                        if (!d.tiles[tileId]) {
+                            d.tiles[tileId] = {
+                                id: tileId,
+                                kind: "folder",
+                                label: b.name,
+                                iconName: b.iconName
+                            };
+                        }
+
+                        const cfg = d.colorSystemConfigs[d.colorSystem];
+                        if (cfg) {
+                            cfg.tileAssignments[tileId] = {
+                                categoryId: d.colorSystem === "tobiiDynavox" ? "td-fringe" : id,
+                                targetBoardId: id,
+                                colorKey: undefined
+                            };
+                        }
 
                         addToBoard(d, "home", [tileId]);
                     })
             };
         }, {
             name: "wikahon-board-v2",
-            version: 2,
+            version: 3,
             skipHydration: true,
             storage: createJSONStorage(() => ({
                 getItem: key => {
@@ -684,9 +1005,10 @@ export const createBoardStore = () =>
                         return null;
 
                     try {
+                        const migratedV1 = migrateV1(JSON.parse(legacy).state);
                         return JSON.stringify({
-                            state: migrateV1(JSON.parse(legacy).state),
-                            version: 2
+                            state: migrateBoardData(migratedV1, 3),
+                            version: 3
                         });
                     } catch {
                         return null;
@@ -704,12 +1026,14 @@ export const createBoardStore = () =>
                 removeItem: key => localStorage.removeItem(key)
             })),
 
-            migrate: value => migrateV1(value),
+            migrate: (value, version) => migrateBoardData(value, version),
 
             partialize: ({
                 tiles,
                 boards,
                 catalogOrder,
+                colorSystem,
+                colorSystemConfigs,
                 gridConfig,
                 layoutMode,
                 tileAppearance,
@@ -720,6 +1044,8 @@ export const createBoardStore = () =>
                 tiles,
                 boards,
                 catalogOrder,
+                colorSystem,
+                colorSystemConfigs,
                 gridConfig,
                 layoutMode,
                 tileAppearance,

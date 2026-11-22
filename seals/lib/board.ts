@@ -28,7 +28,56 @@ export const INITIAL_DICTIONARY = Object.fromEntries(CATEGORY_IDS.map(categoryId
 export const ICONS = Object.values(INITIAL_DICTIONARY).flat().map(tile => ({ name: tile.iconName, label: tile.label, path: `/gifs/${tile.label.toLowerCase().replaceAll(" ", "-")}.gif` }));
 ICONS.push(...["tigil", "ayoko", "gusto-ko-pa"].map(name => ({ name, label: name.replaceAll("-", " "), path: `/gifs/${name}.gif` })));
 export const iconPath = (name: string | null) => ICONS.find(icon => icon.name === name)?.path;
-export type ColorKey = "rose" | "emerald" | "amber" | "blue" | "violet" | "teal" | "orange" | "pink" | "slate";
+
+export type ColorKey =
+    | "rose"
+    | "emerald"
+    | "amber"
+    | "yellow"
+    | "blue"
+    | "violet"
+    | "teal"
+    | "orange"
+    | "pink"
+    | "white"
+    | "slate";
+
+export type ColorSystemId = "custom" | "modifiedFitzgerald" | "tobiiDynavox";
+
+export const COLOR_SYSTEMS: Record<ColorSystemId, { label: string }> = {
+    custom: { label: "Custom Colors" },
+    modifiedFitzgerald: { label: "Modified Fitzgerald" },
+    tobiiDynavox: { label: "Tobii Dynavox" },
+};
+
+export interface PresetCatalogSpec {
+    id: string;
+    name: string;
+    shortName: string;
+    colorKey: ColorKey;
+    iconName: string | null;
+}
+
+export const MODIFIED_FITZGERALD_CATALOGS: PresetCatalogSpec[] = [
+    { id: "mf-pronouns", name: "Pronouns & People", shortName: "People", colorKey: "yellow", iconName: "mother" },
+    { id: "mf-verbs", name: "Verbs / Actions", shortName: "Verbs", colorKey: "emerald", iconName: "eat" },
+    { id: "mf-descriptors", name: "Descriptors", shortName: "Descriptors", colorKey: "blue", iconName: "happy" },
+    { id: "mf-nouns", name: "Nouns / Things", shortName: "Nouns", colorKey: "orange", iconName: "water" },
+    { id: "mf-social", name: "Social Words", shortName: "Social", colorKey: "pink", iconName: "please" },
+    { id: "mf-questions", name: "Question Words", shortName: "Questions", colorKey: "blue", iconName: "speech" },
+    { id: "mf-little", name: "Little / Grammatical Words", shortName: "Little", colorKey: "pink", iconName: "wait" },
+    { id: "mf-places", name: "Places", shortName: "Places", colorKey: "violet", iconName: "toilet" },
+];
+
+export const TOBII_DYNAVOX_CATALOGS: PresetCatalogSpec[] = [
+    { id: "td-pronouns", name: "Pronouns & People", shortName: "People", colorKey: "yellow", iconName: "mother" },
+    { id: "td-verbs", name: "Verbs / Actions", shortName: "Verbs", colorKey: "emerald", iconName: "eat" },
+    { id: "td-questions", name: "Question Words", shortName: "Questions", colorKey: "blue", iconName: "speech" },
+    { id: "td-little", name: "Little Words", shortName: "Little", colorKey: "orange", iconName: "wait" },
+    { id: "td-descriptors", name: "Descriptors", shortName: "Descriptors", colorKey: "white", iconName: "happy" },
+    { id: "td-fringe", name: "Fringe Vocabulary / Nouns", shortName: "Fringe", colorKey: "pink", iconName: "water" },
+];
+
 export type WordClass = "social" | "question" | "verb" | "pronoun" | "particle" | "modifier" | "place" | "noun" | "other";
 export const WORD_COLORS: Record<WordClass, ColorKey> = { social: "rose", question: "slate", verb: "emerald", pronoun: "amber", particle: "pink", modifier: "blue", place: "violet", noun: "orange", other: "teal" };
 export interface Tile {
@@ -37,11 +86,98 @@ export interface Tile {
     label: string;
     spokenText?: string;
     iconName: string | null;
-    categoryId: string;
+    categoryId?: string;
     targetBoardId?: string;
     colorKey?: ColorKey;
     wordClass?: WordClass;
     isCustom?: boolean;
+}
+export interface TileSystemAssignment {
+    categoryId: string;
+    targetBoardId?: string;
+    colorKey?: ColorKey;
+    wordClass?: WordClass;
+}
+export interface ColorSystemConfig {
+    boards: Record<string, CatalogBoard>;
+    catalogOrder: string[];
+    tileAssignments: Record<string, TileSystemAssignment>;
+    initialized: boolean;
+}
+export function resolveTileForSystem(
+    tile: Tile,
+    assignment: TileSystemAssignment | undefined,
+    colorSystem: ColorSystemId,
+    boards?: Record<string, CatalogBoard>
+): Tile {
+    let categoryId = assignment?.categoryId;
+
+    if (!categoryId && boards) {
+        for (const [boardId, board] of Object.entries(boards)) {
+            if (boardId === "home")
+                continue;
+
+            const found = board.pages.some(page =>
+                Object.values(page.cells).some(cell => cell?.tileId === tile.id)
+            );
+
+            if (found) {
+                categoryId = boardId;
+                break;
+            }
+        }
+    }
+
+    if (colorSystem === "custom") {
+        const targetBoardId = assignment?.targetBoardId ?? tile.targetBoardId;
+        return {
+            ...tile,
+            categoryId: categoryId ?? tile.categoryId ?? "",
+            ...(targetBoardId !== undefined ? { targetBoardId } : {}),
+            colorKey: assignment?.colorKey ?? tile.colorKey,
+            wordClass: assignment?.wordClass ?? tile.wordClass,
+        };
+    }
+
+    return {
+        ...tile,
+        categoryId: categoryId ?? "",
+        ...(assignment?.targetBoardId !== undefined
+            ? { targetBoardId: assignment.targetBoardId }
+            : {}),
+        colorKey: undefined,
+        wordClass: assignment?.wordClass,
+    };
+}
+export function resolveTileColorKey(
+    tile: Tile,
+    assignment: TileSystemAssignment | undefined,
+    boards: Record<string, CatalogBoard>,
+    colorSystem: ColorSystemId,
+    colorMode: "catalog" | "wordClass"
+): ColorKey {
+    const resolved = resolveTileForSystem(tile, assignment, colorSystem, boards);
+
+    if (colorSystem === "custom") {
+        if (colorMode === "wordClass" && resolved.wordClass) {
+            return WORD_COLORS[resolved.wordClass];
+        }
+        return (
+            resolved.colorKey ??
+            (resolved.categoryId ? boards[resolved.categoryId]?.colorKey : undefined) ??
+            "slate"
+        );
+    }
+
+    if (resolved.categoryId && boards[resolved.categoryId]) {
+        return boards[resolved.categoryId].colorKey;
+    }
+
+    if (colorSystem === "tobiiDynavox" && tile.kind === "folder") {
+        return "pink";
+    }
+
+    return "slate";
 }
 export type CellKey = `${number}:${number}`;
 export interface CellPlacement {
