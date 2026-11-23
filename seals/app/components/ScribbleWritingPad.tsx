@@ -36,6 +36,15 @@ export default function ScribbleWritingPad({ canvasRef, state: s, actions: a }: 
                     <button type="button" disabled={!s.hasStroke || s.isRecognizing} onClick={a.clearCanvas} className={`${button} border border-slate-300 bg-white text-slate-700 hover:bg-slate-100`}>
                         Clear pad
                     </button>
+                    <button
+                        type="button"
+                        disabled={!s.hasStroke || s.isRecognizing}
+                        aria-describedby="scribble-recognition-disclosure"
+                        onClick={() => void a.recognize()}
+                        className={`${button} bg-sky-700 text-white hover:bg-sky-800`}
+                    >
+                        {s.isRecognizing ? "Recognizing…" : "Recognize writing"}
+                    </button>
                 </div>
             </div>
             <div className="overflow-hidden rounded-xl border-2 border-slate-300 bg-white shadow-inner">
