@@ -1,62 +1,109 @@
 "use client";
+/* Animated local symbols intentionally use img to preserve GIF playback when explicitly enabled. */
+/* eslint-disable @next/next/no-img-element */
+import type { CSSProperties } from "react";
+import { resolveBoardTileColor, type Tile, type ColorKey, type CatalogBoard } from "@/lib/board";
+import { palette } from "@/app/theme";
+import type { BoardData } from "@/store/useBoardStore";
+import { useBoardStore } from "@/store/BoardProvider";
+import { useTileInteractionViewModel } from "@/viewmodels/useTileInteractionViewModel";
+import { useMediaUrl } from "@/viewmodels/useMediaUrl";
 
-import React from "react";
-import { theme } from "@/app/theme";
-
-interface TileButtonProps {
-  id: string;
-  label: string;
-  gifPath?: string;
-  category?: string;
-  onPress: (label: string) => void;
-  editing?: boolean;
-  buttonProps?: Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "onClick">;
+export function TileVisual({
+    tile,
+    color = "slate",
+    appearance,
+}: {
+    tile: Tile;
+    color?: ColorKey;
+    appearance?: BoardData["tileAppearance"];
+}) {
+    const { src, missingMedia } = useMediaUrl(tile.iconName, tile.mediaId);
+    const p = palette[color] ?? palette.slate;
+    return (
+        <span
+            className={`tile-content label-${appearance?.labelPosition ?? "bottom"} font-${appearance?.fontScale ?? "md"} icon-${appearance?.iconScale ?? "md"}`}
+            style={{ backgroundColor: p.surface, borderColor: p.border, color: p.text,
+                "--tile-bg": p.bg, "--tile-surface": p.surface,
+                "--tile-border": p.border, "--tile-text": p.text } as CSSProperties}
+        >
+            {tile.kind === "folder" && (
+                <span className="folder-badge" aria-hidden="true">
+                    ▰
+                </span>
+            )}
+            {appearance?.showIcons !== false && tile.iconName === "speech" && !tile.mediaId && (
+                <span aria-hidden="true" className="speech-symbol">
+                    💬
+                </span>
+            )}
+            {appearance?.showIcons !== false && src && <img src={src} alt="" draggable={false} />}
+            <span className={`tile-label font-aac ${!src || appearance?.showIcons === false ? "text-only" : ""}`}>
+                {tile.label}
+                {missingMedia && <span className="sr-only"> (photo unavailable)</span>}
+            </span>
+        </span>
+    );
 }
 
-const TileButton = React.memo(function TileButton({
-  label,
-  gifPath,
-  category,
-  onPress,
-  editing,
-  buttonProps,
-}: TileButtonProps) {
-  const tileStyle =
-    (category && category in theme.categoryTiles
-      ? theme.categoryTiles[category as keyof typeof theme.categoryTiles]
-      : theme.tile);
+export default function TileButton({
+    tile,
+    hidden,
+    editing,
+    moving,
+    color,
+    boards,
+    boardId,
+    appearance,
+    onEdit,
+    onMove,
+}: {
+    tile?: Tile;
+    hidden: boolean;
+    editing: boolean;
+    moving: boolean;
+    color: ColorKey;
+    boards?: Record<string, Pick<CatalogBoard, "colorKey">>;
+    boardId?: string;
+    appearance: BoardData["tileAppearance"];
+    onEdit: () => void;
+    onMove?: () => void;
+}) {
+    const events = useTileInteractionViewModel(tile, hidden, onEdit, onMove, boardId);
+    const colorSystem = useBoardStore(s => s.colorSystem);
+    const allBoards = useBoardStore(s => s.boards);
+    const actualColor = boards
+        ? resolveBoardTileColor(tile, allBoards, appearance.colorMode, colorSystem, boardId)
+        : appearance.colorMode === "neutral"
+          ? "slate"
+          : tile?.colorKey ?? color;
 
-  return (
-    <button
-      {...buttonProps}
-      type="button"
-      onClick={() => onPress(label)}
-      className={`${tileStyle.bg} ${editing ? "border-2 border-dashed border-gray-500" : `border ${tileStyle.border}`} ${tileStyle.hoverBg} ${tileStyle.hoverBorder} ${tileStyle.activeBg} ${tileStyle.activeBorder} ${tileStyle.focusRing} rounded-none shadow-xs transition-all duration-100 flex flex-col items-center justify-center p-2 focus:outline-none focus:ring-2 relative group flex-1 w-full min-h-0`}
-    >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      {gifPath && <img
-        src={gifPath}
-        alt=""
-        className="w-12 h-12 md:w-16 md:h-16 object-contain mb-1 md:mb-2 group-hover:scale-105 transition-transform mix-blend-multiply"
-        onError={(e) => {
-          const target = e.currentTarget;
-          target.style.display = "none";
-          if (target.nextElementSibling) {
-            (target.nextElementSibling as HTMLElement).style.display = "flex";
-          }
-        }}
-      />}
-      <div
-        className="w-12 h-12 md:w-16 md:h-16 mb-1 md:mb-2 items-center justify-center text-xs font-bold text-slate-400"
-        style={{ display: gifPath ? "none" : "flex" }}
-      >
-        <svg aria-hidden="true" viewBox="0 0 48 48" className="w-full h-full"><path d="M6 8h36v25H23L12 42v-9H6Z" fill="currentColor" opacity=".2"/><path d="M6 8h36v25H23L12 42v-9H6Z" fill="none" stroke="currentColor" strokeWidth="3"/><path d="M14 17h20M14 24h13" stroke="currentColor" strokeWidth="3"/></svg>
-      </div>
-      <span className={`text-lg lg:text-xl font-semibold ${tileStyle.labelText} text-center leading-tight`}>
-        {label}
-      </span>
-    </button>
-  );
-});
+    const isInactiveSlot = !editing && (!tile || hidden);
 
-export default TileButton;
+    return (
+        <button
+            type="button"
+            {...events}
+            className={`aac-tile ${hidden ? "hidden-tile" : ""} ${moving ? "moving-tile" : ""}`}
+            tabIndex={isInactiveSlot ? -1 : undefined}
+            aria-label={
+                hidden && !editing
+                    ? "Empty slot"
+                    : tile
+                      ? `${tile.kind === "folder" ? "Open folder: " : ""}${tile.label}${hidden ? " (hidden)" : ""}${editing ? ", edit tile" : ""}`
+                      : editing
+                        ? "Add tile"
+                        : "Empty slot"
+            }
+            aria-disabled={isInactiveSlot && !onMove}
+        >
+            {tile && (!hidden || editing) ? (
+                <TileVisual tile={tile} color={actualColor} appearance={appearance} />
+            ) : (
+                <span aria-hidden="true" className="empty-slot">
+                    {editing || onMove ? "+" : ""}
+                </span>
+            )}
+        </button>
+    );
+}

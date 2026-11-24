@@ -1,0 +1,219 @@
+import type { CatalogBoard, ColorSystemId, Tile } from "@/lib/board";
+import { isValidMediaId } from "@/models/boardData";
+import type { BoardSupabaseClient } from "./client";
+import type { ProfileMemberRole, ProfileMembershipRow, ProfileRow } from "./database.types";
+import {
+    boardEntryFromRow,
+    boardToRow,
+    tileFromRow,
+    tileToRow,
+    settingsFromRow,
+    settingsToRow,
+    type BoardEntry,
+    type CloudSettings,
+} from "./mappers";
+
+async function readPages<T>(read: (from: number, to: number) => PromiseLike<{ data: T[] | null }>): Promise<T[]> {
+    const result: T[] = [];
+    const size = 500;
+    for (let start = 0; ; start += size) {
+        const { data } = await read(start, start + size - 1);
+        result.push(...(data ?? []));
+        if (!data || data.length < size) return result;
+    }
+}
+
+export const PROFILE_MEDIA_BUCKET = "profile-media";
+
+/** Explicit persistence operations. Callers handle errors and retain their local data. */
+export interface IBoardRepository {
+    listProfiles(): Promise<ProfileRow[]>;
+    createProfile(name: string, ownerId: string): Promise<ProfileRow>;
+    deleteProfile(profileId: string): Promise<void>;
+    listMemberships(profileId: string): Promise<ProfileMembershipRow[]>;
+    setMembership(profileId: string, userId: string, role: ProfileMemberRole): Promise<void>;
+    removeMembership(profileId: string, userId: string): Promise<void>;
+    listBoards(profileId: string): Promise<BoardEntry[]>;
+    saveBoard(profileId: string, board: CatalogBoard, catalogSystem?: ColorSystemId | null): Promise<void>;
+    saveBoards(profileId: string, boards: CatalogBoard[], catalogSystem?: ColorSystemId | null): Promise<void>;
+    deleteBoards(profileId: string, boardIds: string[]): Promise<void>;
+    listTiles(profileId: string): Promise<Tile[]>;
+    saveTile(profileId: string, tile: Tile): Promise<void>;
+    saveTiles(profileId: string, tiles: Tile[]): Promise<void>;
+    deleteTiles(profileId: string, tileIds: string[]): Promise<void>;
+    getSettings(profileId: string): Promise<CloudSettings | null>;
+    saveSettings(profileId: string, settings: CloudSettings): Promise<void>;
+    uploadProfileMedia(profileId: string, mediaId: string, blob: Blob, mimeType: string): Promise<void>;
+    downloadProfileMedia(profileId: string, mediaId: string): Promise<Blob | null>;
+    listProfileMedia(profileId: string): Promise<string[]>;
+    removeProfileMedia(profileId: string, mediaIds: string[]): Promise<void>;
+}
+
+export class SupabaseBoardRepository implements IBoardRepository {
+    constructor(private readonly client: BoardSupabaseClient) {}
+
+    async listProfiles() {
+        return readPages((from, to) =>
+            this.client.from("profiles").select("*").order("id").range(from, to).throwOnError(),
+        );
+    }
+    async createProfile(name: string, ownerId: string) {
+        const { data } = await this.client.from("profiles").insert({ name, owner_id: ownerId }).select().single().throwOnError();
+        return data!;
+    }
+    async deleteProfile(profileId: string) {
+        await this.client.from("profiles").delete().eq("id", profileId).throwOnError();
+    }
+    async listMemberships(profileId: string) {
+        return readPages((from, to) =>
+            this.client
+                .from("profile_memberships")
+                .select("*")
+                .eq("profile_id", profileId)
+                .order("user_id")
+                .range(from, to)
+                .throwOnError(),
+        );
+    }
+    async setMembership(profileId: string, userId: string, role: ProfileMemberRole) {
+        await this.client
+            .from("profile_memberships")
+            .upsert({ profile_id: profileId, user_id: userId, role }, { onConflict: "profile_id,user_id" })
+            .throwOnError();
+    }
+    async removeMembership(profileId: string, userId: string) {
+        await this.client
+            .from("profile_memberships")
+            .delete()
+            .eq("profile_id", profileId)
+            .eq("user_id", userId)
+            .throwOnError();
+    }
+    async listBoards(profileId: string) {
+        return (
+            await readPages((from, to) =>
+                this.client
+                    .from("boards")
+                    .select("*")
+                    .eq("profile_id", profileId)
+                    .order("id")
+                    .range(from, to)
+                    .throwOnError(),
+            )
+        ).map(boardEntryFromRow);
+    }
+    async saveBoard(profileId: string, board: CatalogBoard, catalogSystem: ColorSystemId | null = null) {
+        await this.client
+            .from("boards")
+            .upsert(boardToRow(profileId, board, catalogSystem), { onConflict: "profile_id,id" })
+            .throwOnError();
+    }
+    async saveBoards(profileId: string, boards: CatalogBoard[], catalogSystem: ColorSystemId | null = null) {
+        if (boards.length === 0) return;
+        await this.client
+            .from("boards")
+            .upsert(
+                boards.map(b => boardToRow(profileId, b, catalogSystem)),
+                { onConflict: "profile_id,id" },
+            )
+            .throwOnError();
+    }
+    async deleteBoards(profileId: string, boardIds: string[]) {
+        if (boardIds.length === 0) return;
+        await this.client.from("boards").delete().eq("profile_id", profileId).in("id", boardIds).throwOnError();
+    }
+    async listTiles(profileId: string) {
+        return (
+            await readPages((from, to) =>
+                this.client
+                    .from("tiles")
+                    .select("*")
+                    .eq("profile_id", profileId)
+                    .order("id")
+                    .range(from, to)
+                    .throwOnError(),
+            )
+        ).map(tileFromRow);
+    }
+    async saveTile(profileId: string, tile: Tile) {
+        await this.client
+            .from("tiles")
+            .upsert(tileToRow(profileId, tile), { onConflict: "profile_id,id" })
+            .throwOnError();
+    }
+    async saveTiles(profileId: string, tiles: Tile[]) {
+        if (tiles.length === 0) return;
+        await this.client
+            .from("tiles")
+            .upsert(
+                tiles.map(t => tileToRow(profileId, t)),
+                { onConflict: "profile_id,id" },
+            )
+            .throwOnError();
+    }
+    async deleteTiles(profileId: string, tileIds: string[]) {
+        if (tileIds.length === 0) return;
+        await this.client.from("tiles").delete().eq("profile_id", profileId).in("id", tileIds).throwOnError();
+    }
+    async getSettings(profileId: string) {
+        const { data } = await this.client
+            .from("profile_settings")
+            .select("*")
+            .eq("profile_id", profileId)
+            .maybeSingle()
+            .throwOnError();
+        return data ? settingsFromRow(data) : null;
+    }
+    async saveSettings(profileId: string, settings: CloudSettings) {
+        await this.client
+            .from("profile_settings")
+            .upsert(settingsToRow(profileId, settings), { onConflict: "profile_id" })
+            .throwOnError();
+    }
+    async uploadProfileMedia(profileId: string, mediaId: string, blob: Blob, mimeType: string) {
+        if (!isValidMediaId(mediaId)) throw new Error("Invalid media ID");
+        const path = `${profileId}/${mediaId}`;
+        const { error } = await this.client.storage
+            .from(PROFILE_MEDIA_BUCKET)
+            .upload(path, blob, { upsert: false, contentType: mimeType });
+        if (error) {
+            const statusCode = (error as { statusCode?: string | number }).statusCode;
+            if (String(statusCode) === "409" || /already exists|Duplicate/i.test(error.message ?? "")) {
+                return;
+            }
+            throw error;
+        }
+    }
+    async downloadProfileMedia(profileId: string, mediaId: string): Promise<Blob | null> {
+        if (!isValidMediaId(mediaId)) return null;
+        const path = `${profileId}/${mediaId}`;
+        const { data, error } = await this.client.storage.from(PROFILE_MEDIA_BUCKET).download(path);
+        if (error) return null;
+        return data;
+    }
+    async listProfileMedia(profileId: string): Promise<string[]> {
+        const ids: string[] = [];
+        const limit = 500;
+        for (let offset = 0; ; offset += limit) {
+            const { data, error } = await this.client.storage
+                .from(PROFILE_MEDIA_BUCKET)
+                .list(profileId, { limit, offset });
+            if (error) throw error;
+            const entries = data ?? [];
+            for (const entry of entries) {
+                if (isValidMediaId(entry.name)) {
+                    ids.push(entry.name);
+                }
+            }
+            if (entries.length < limit) return ids;
+        }
+    }
+    async removeProfileMedia(profileId: string, mediaIds: string[]): Promise<void> {
+        const valid = mediaIds.filter(isValidMediaId);
+        if (valid.length === 0) return;
+        const { error } = await this.client.storage
+            .from(PROFILE_MEDIA_BUCKET)
+            .remove(valid.map(id => `${profileId}/${id}`));
+        if (error) throw error;
+    }
+}

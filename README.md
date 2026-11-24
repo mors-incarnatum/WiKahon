@@ -40,12 +40,20 @@
    ```sh
    npm install
    ```
-4. Run the project
+4. Create `seals/.env.local` and add the Supabase settings required by the app:
+   ```dotenv
+   NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your-publishable-key
+   SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+   ```
+   `SUPABASE_SERVICE_ROLE_KEY` is server-only. Never expose it through a
+   `NEXT_PUBLIC_*` variable or commit it to source control.
+5. Run the project
    ```sh
    npm run dev
    ```
-5. Open http://localhost:3000 in your browser.
-  
+6. Open http://localhost:3000 in your browser.
+
 ### Top contributors:
 
 <a href="https://github.com/mors-incarnatum/CBINOV3-SEALs/graphs/contributors">
