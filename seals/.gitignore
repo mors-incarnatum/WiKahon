@@ -49,3 +49,4 @@ next-env.d.ts
 
 /graphify-out
 certificates
+/seals/android
