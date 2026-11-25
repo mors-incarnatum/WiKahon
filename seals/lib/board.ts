@@ -277,6 +277,29 @@ export function resolveTokenColor(
     return token.colorKey;
 }
 
+export function createSentenceToken(
+    tile: Tile,
+    boards: Record<string, CatalogBoard>,
+    colorSystem: ColorSystemId = "custom",
+    boardId?: string,
+): SentenceToken {
+    const isPresetColorSystem = Boolean(colorSystem && colorSystem !== "custom");
+    const presetColorKey = isPresetColorSystem
+        ? resolveBoardTileColor(tile, boards, "catalog", colorSystem, boardId)
+        : undefined;
+    return {
+        instanceId: uid(),
+        tileId: tile.id,
+        label: tile.label,
+        spokenText: tile.spokenText || tile.label,
+        iconName: tile.iconName,
+        mediaId: tile.mediaId ?? null,
+        colorKey: presetColorKey ?? tile.colorKey ?? boards[tile.categoryId]?.colorKey ?? "slate",
+        wordClass: tile.wordClass,
+        ...(presetColorKey ? { displayColorKey: presetColorKey } : {}),
+    };
+}
+
 export const uid = () =>
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()

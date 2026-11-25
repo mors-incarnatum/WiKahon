@@ -2,8 +2,8 @@ import { createStore } from "zustand/vanilla";
 import {
     cellKey,
     clampGrid,
+    createSentenceToken,
     inBounds,
-    resolveBoardTileColor,
     uid,
     type Tile,
     type CatalogBoard,
@@ -453,7 +453,7 @@ export function countUnreadChatMessages(
     senderRole: ChatMessage["sender"],
     lastReadAt?: string,
 ): number {
-    if (!currentUserId) return 0;
+    if (!currentUserId || currentUserId === LOCAL_CHILD_SESSION.user.id) return 0;
     const lastReadTs = lastReadAt ? Date.parse(lastReadAt) : NaN;
     let count = 0;
     for (const m of messages) {
@@ -744,6 +744,11 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
             return isGuardianRole(s.currentUser?.role);
         };
 
+        const canMutateLayout = (): boolean => {
+            const s = get();
+            return isGuardianRole(s.currentUser?.role) || Boolean(s.featureFlags?.childBoardLayout);
+        };
+
         const mutateBoard = (
             fn: (data: BoardData) => void,
             requireEditGuard = true,
@@ -771,7 +776,7 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
         };
 
         const reflowBoards = (ids: string[], grid?: GridConfig, boardId?: string): boolean => {
-            if (!canMutateSettings()) return false;
+            if (!canMutateLayout()) return false;
             const current = get();
             if ((!ids.length && !grid) || ids.some(id => !current.boards[id])) return false;
             // Capture the entire operation before changing dimensions or moving tiles.
@@ -785,13 +790,17 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                     pages: structuredClone(current.boards[id].pages),
                 })),
             };
-            const ok = mutateBoard(data => {
-                if (grid) {
-                    if (boardId) data.boards[boardId].gridOverride = clampGrid(grid);
-                    else data.gridConfig = clampGrid(grid);
-                }
-                ids.forEach(id => reflowBoard(data, id));
-            });
+            const ok = mutateBoard(
+                data => {
+                    if (grid) {
+                        if (boardId) data.boards[boardId].gridOverride = clampGrid(grid);
+                        else data.gridConfig = clampGrid(grid);
+                    }
+                    ids.forEach(id => reflowBoard(data, id));
+                },
+                false,
+                canMutateSettings(),
+            );
             if (ok) set({ preReflowSnapshot: snapshot });
             return ok;
         };
@@ -1710,51 +1719,67 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 return ok;
             },
 
-            setGridConfig: (grid, id) =>
-                mutateBoard(d => {
-                    if (id && d.boards[id]) d.boards[id].gridOverride = clampGrid(grid);
-                    else if (!id) d.gridConfig = clampGrid(grid);
-                    Object.values(d.boards)
-                        .filter(b => (id ? b.id === id : !b.gridOverride))
-                        .forEach(b => repackBoard(d, b.id));
-                }),
-
-            applyBoardSettings: (grid, appearance, mode, id, useGlobal = false) =>
-                mutateBoard(d => {
-                    const nextGrid = clampGrid(grid);
-                    const previousGrid = (id ? d.boards[id]?.gridOverride : undefined) ?? d.gridConfig;
-                    if (id && d.boards[id]) {
-                        if (useGlobal) {
-                            delete d.boards[id].gridOverride;
-                            delete d.boards[id].layoutModeOverride;
-                        } else {
-                            d.boards[id].layoutModeOverride = mode;
-                            if (mode === "manual") d.boards[id].gridOverride = nextGrid;
-                        }
-                    } else if (!id) {
-                        d.layoutMode = mode;
-                        if (mode === "manual") d.gridConfig = nextGrid;
-                    }
-                    d.tileAppearance = normalizeAppearance(appearance);
-                    if (
-                        mode === "manual" &&
-                        !useGlobal &&
-                        (nextGrid.rows !== previousGrid.rows || nextGrid.cols !== previousGrid.cols)
-                    ) {
+            setGridConfig: (grid, id) => {
+                if (!canMutateLayout()) return false;
+                return mutateBoard(
+                    d => {
+                        if (id && d.boards[id]) d.boards[id].gridOverride = clampGrid(grid);
+                        else if (!id) d.gridConfig = clampGrid(grid);
                         Object.values(d.boards)
-                            .filter(b =>
-                                id
-                                    ? b.id === id
-                                    : !b.gridOverride && (b.layoutModeOverride ?? d.layoutMode) === "manual",
-                            )
-                            .forEach(b => repackBoard(d, b.id, nextGrid));
-                    }
-                }),
+                            .filter(b => (id ? b.id === id : !b.gridOverride))
+                            .forEach(b => repackBoard(d, b.id));
+                    },
+                    false,
+                    canMutateSettings(),
+                );
+            },
 
-            reflowOutOfBoundsTiles: id => mutateBoard(d => repackBoard(d, id)),
+            applyBoardSettings: (grid, appearance, mode, id, useGlobal = false) => {
+                if (!canMutateLayout()) return false;
+                return mutateBoard(
+                    d => {
+                        const nextGrid = clampGrid(grid);
+                        const previousGrid = (id ? d.boards[id]?.gridOverride : undefined) ?? d.gridConfig;
+                        if (id && d.boards[id]) {
+                            if (useGlobal) {
+                                delete d.boards[id].gridOverride;
+                                delete d.boards[id].layoutModeOverride;
+                            } else {
+                                d.boards[id].layoutModeOverride = mode;
+                                if (mode === "manual") d.boards[id].gridOverride = nextGrid;
+                            }
+                        } else if (!id) {
+                            d.layoutMode = mode;
+                            if (mode === "manual") d.gridConfig = nextGrid;
+                        }
+                        d.tileAppearance = normalizeAppearance(appearance);
+                        if (
+                            mode === "manual" &&
+                            !useGlobal &&
+                            (nextGrid.rows !== previousGrid.rows || nextGrid.cols !== previousGrid.cols)
+                        ) {
+                            Object.values(d.boards)
+                                .filter(b =>
+                                    id
+                                        ? b.id === id
+                                        : !b.gridOverride && (b.layoutModeOverride ?? d.layoutMode) === "manual",
+                                )
+                                .forEach(b => repackBoard(d, b.id, nextGrid));
+                        }
+                    },
+                    false,
+                    canMutateSettings(),
+                );
+            },
+
+            reflowOutOfBoundsTiles: id => {
+                if (!canMutateLayout()) return false;
+                return mutateBoard(d => repackBoard(d, id), false, canMutateSettings());
+            },
 
             // Only update Zustand when the actual page arrangement changes.
             reflowBoardToGrid: (id, grid) => {
+                if (!canMutateLayout()) return;
                 const state = get();
                 const board = state.boards[id];
                 if (!board) return;
@@ -1763,9 +1788,13 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 if (JSON.stringify(board.pages) === JSON.stringify(nextPages)) {
                     return;
                 }
-                mutateBoard(data => {
-                    data.boards[id].pages = nextPages;
-                });
+                mutateBoard(
+                    data => {
+                        data.boards[id].pages = nextPages;
+                    },
+                    false,
+                    canMutateSettings(),
+                );
             },
 
             setGridConfigAndReflow: (grid, id) =>
@@ -1776,31 +1805,42 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 ),
 
             rollbackReflow: () => {
+                if (!canMutateLayout()) return false;
                 const snap = get().preReflowSnapshot;
                 if (!snap) return false;
-                const ok = mutateBoard(d => {
-                    for (const previous of snap.boards) {
-                        const b = d.boards[previous.boardId];
-                        if (!b) continue;
-                        b.pages = structuredClone(previous.pages);
-                        if (previous.previousGrid) {
-                            b.gridOverride = { ...previous.previousGrid };
-                        } else {
-                            delete b.gridOverride;
+                const ok = mutateBoard(
+                    d => {
+                        for (const previous of snap.boards) {
+                            const b = d.boards[previous.boardId];
+                            if (!b) continue;
+                            b.pages = structuredClone(previous.pages);
+                            if (previous.previousGrid) {
+                                b.gridOverride = { ...previous.previousGrid };
+                            } else {
+                                delete b.gridOverride;
+                            }
                         }
-                    }
-                    d.gridConfig = { ...snap.previousGlobalGrid };
-                });
+                        d.gridConfig = { ...snap.previousGlobalGrid };
+                    },
+                    false,
+                    canMutateSettings(),
+                );
                 if (ok) {
                     set({ preReflowSnapshot: null });
                 }
                 return ok;
             },
 
-            setTileAppearance: patch =>
-                mutateBoard(d => {
-                    d.tileAppearance = normalizeAppearance({ ...d.tileAppearance, ...patch });
-                }),
+            setTileAppearance: patch => {
+                if (!canMutateLayout()) return false;
+                return mutateBoard(
+                    d => {
+                        d.tileAppearance = normalizeAppearance({ ...d.tileAppearance, ...patch });
+                    },
+                    false,
+                    canMutateSettings(),
+                );
+            },
 
             setSpeechConfig: patch => {
                 const keys = Object.keys(patch);
@@ -1828,21 +1868,7 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
             appendSentenceTile: (tile, boardId) => {
                 const s = get();
                 const history = pushSentenceHistory(s.sentenceHistory, s.sentence);
-                const isPresetColorSystem = Boolean(s.colorSystem && s.colorSystem !== "custom");
-                const presetColorKey = isPresetColorSystem
-                    ? resolveBoardTileColor(tile, s.boards, "catalog", s.colorSystem, boardId)
-                    : undefined;
-                const nextToken: SentenceToken = {
-                    instanceId: uid(),
-                    tileId: tile.id,
-                    label: tile.label,
-                    spokenText: tile.spokenText || tile.label,
-                    iconName: tile.iconName,
-                    mediaId: tile.mediaId ?? null,
-                    colorKey: presetColorKey ?? tile.colorKey ?? s.boards[tile.categoryId]?.colorKey ?? "slate",
-                    wordClass: tile.wordClass,
-                    ...(presetColorKey ? { displayColorKey: presetColorKey } : {}),
-                };
+                const nextToken = createSentenceToken(tile, s.boards, s.colorSystem ?? "custom", boardId);
                 const nextSentence = [...s.sentence, nextToken];
                 set({
                     sentence: nextSentence,
@@ -2136,12 +2162,9 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
 
             markChatRead: () => {
                 const state = get();
-                if (!state.currentUser) return;
-                const scopeKey = chatReadScopeKey(
-                    state.currentUser.id,
-                    state.activeProfileId,
-                    state.cloudProfileId,
-                );
+                const context = resolveChatBindingContext(state.currentUser, state.activeProfileId, state.cloudProfileId);
+                if (!context) return;
+                const scopeKey = chatReadScopeKey(context.userId, context.localProfileId, context.cloudProfileId);
                 let latestMsgTs = -Infinity;
                 for (const m of state.experimentalData?.chatMessages ?? []) {
                     if (m.verified !== true || !m.createdAt) continue;

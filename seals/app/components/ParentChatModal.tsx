@@ -1,10 +1,85 @@
 "use client";
+/* eslint-disable @next/next/no-img-element */
 
 import { useEffect, useRef, useState } from "react";
+import { palette } from "@/app/theme";
+import { resolveTokenColor, type ColorMode, type ColorSystemId, type SentenceToken } from "@/lib/board";
 import type { ChatConnectionStatus } from "@/services/chat/chatSocketService";
 import { isOwnChatMessage } from "@/store/useBoardStore";
+import { useMediaUrl } from "@/viewmodels/useMediaUrl";
 import { useParentChatViewModel } from "@/viewmodels/useParentChatViewModel";
 import { useChatHistoryViewModel } from "@/viewmodels/useChatHistoryViewModel";
+
+function ChatLineIcon({ name }: { name: "words" | "speech" | "remove" }) {
+    const common = {
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 1.8,
+        strokeLinecap: "round" as const,
+        strokeLinejoin: "round" as const,
+        "aria-hidden": true as const,
+    };
+
+    switch (name) {
+        case "words":
+            return (
+                <svg {...common} width={18} height={18}>
+                    <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                    <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                    <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                    <rect x="14" y="14" width="7" height="7" rx="1.5" />
+                </svg>
+            );
+        case "speech":
+            return (
+                <svg {...common} width={16} height={16}>
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+            );
+        case "remove":
+            return (
+                <svg {...common} width={14} height={14}>
+                    <path d="m6 6 12 12M18 6 6 18" />
+                </svg>
+            );
+    }
+}
+
+function ChatDraftTokenChip({
+    token,
+    colorMode,
+    colorSystem,
+    onRemove,
+}: {
+    token: SentenceToken;
+    colorMode: ColorMode;
+    colorSystem: ColorSystemId;
+    onRemove: () => void;
+}) {
+    const { src } = useMediaUrl(token.iconName, token.mediaId);
+    const color = resolveTokenColor(token, colorMode, colorSystem);
+    const p = palette[color] ?? palette.slate;
+
+    return (
+        <button
+            type="button"
+            onClick={onRemove}
+            style={{
+                backgroundColor: p.surface,
+                borderColor: p.border,
+                color: p.text,
+            }}
+            aria-label={`Remove ${token.label} from chat draft`}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-sm font-semibold transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-700"
+        >
+            {token.iconName === "speech" && !token.mediaId && <ChatLineIcon name="speech" />}
+            {src && <img src={src} alt="" width={20} height={20} className="h-5 w-5 shrink-0 object-contain" />}
+            <span>{token.label}</span>
+            <ChatLineIcon name="remove" />
+        </button>
+    );
+}
 
 const CONNECTION_STATUS_META: Record<ChatConnectionStatus, { label: string; dotClass: string }> = {
     connected: { label: "Connected", dotClass: "bg-emerald-400" },
@@ -247,6 +322,23 @@ export default function ParentChatModal({ onClose }: { onClose?: () => void } = 
                 }}
                 className="flex shrink-0 flex-col gap-2 border-t border-slate-200 bg-white p-2 sm:p-3"
             >
+                {s.draftTokens.length > 0 && (
+                    <div
+                        className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[#DCEEFF] bg-[#F2F8FF] px-2.5 py-2"
+                        role="group"
+                        aria-label="Selected board words in draft"
+                    >
+                        {s.draftTokens.map(token => (
+                            <ChatDraftTokenChip
+                                key={token.instanceId}
+                                token={token}
+                                colorMode={s.colorMode}
+                                colorSystem={s.colorSystem}
+                                onRemove={() => a.removeDraftToken(token.instanceId)}
+                            />
+                        ))}
+                    </div>
+                )}
                 <div className="flex min-w-0 items-center gap-2">
                     <input
                         value={s.draft}
@@ -268,9 +360,10 @@ export default function ParentChatModal({ onClose }: { onClose?: () => void } = 
                 <button
                     type="button"
                     onClick={a.useWords}
-                    className="min-h-11 self-start rounded-lg border border-sky-700 px-3 text-sm font-semibold text-sky-800 hover:bg-sky-50"
+                    className="inline-flex min-h-11 items-center gap-2 self-start rounded-lg border border-sky-700 px-3 text-sm font-semibold text-sky-800 hover:bg-sky-50"
                 >
-                    Use words
+                    <ChatLineIcon name="words" />
+                    <span>Use words</span>
                 </button>
             </form>
         </section>

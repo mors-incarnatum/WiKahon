@@ -1,11 +1,12 @@
 "use client";
 /* Animated local symbols intentionally use img to preserve GIF playback when explicitly enabled. */
 /* eslint-disable @next/next/no-img-element */
-import type { CSSProperties } from "react";
+import { useContext, type CSSProperties } from "react";
 import { resolveBoardTileColor, type Tile, type ColorKey, type CatalogBoard } from "@/lib/board";
 import { palette } from "@/app/theme";
 import type { BoardData } from "@/store/useBoardStore";
 import { useBoardStore } from "@/store/BoardProvider";
+import { ChatDraftContext } from "@/viewmodels/useChatDraftViewModel";
 import { useTileInteractionViewModel } from "@/viewmodels/useTileInteractionViewModel";
 import { useMediaUrl } from "@/viewmodels/useMediaUrl";
 
@@ -70,6 +71,13 @@ export default function TileButton({
     onMove?: () => void;
 }) {
     const events = useTileInteractionViewModel(tile, hidden, onEdit, onMove, boardId);
+    const chatDraft = useContext(ChatDraftContext);
+    const isSelectingForChat = Boolean(chatDraft?.state.isComposing);
+    const selectedCount =
+        isSelectingForChat && tile && tile.kind === "word" && !hidden
+            ? (chatDraft?.state.selectedTileCounts[tile.id] ?? 0)
+            : 0;
+    const isChatSelected = selectedCount > 0;
     const colorSystem = useBoardStore(s => s.colorSystem);
     const allBoards = useBoardStore(s => s.boards);
     const actualColor = boards
@@ -78,30 +86,52 @@ export default function TileButton({
           ? "slate"
           : tile?.colorKey ?? color;
 
-    const isInactiveSlot = !editing && (!tile || hidden);
+    const effectiveEditing = editing && !isSelectingForChat;
+    const isInactiveSlot = !effectiveEditing && (!tile || hidden);
 
     return (
         <button
             type="button"
             {...events}
-            className={`aac-tile ${hidden ? "hidden-tile" : ""} ${moving ? "moving-tile" : ""}`}
+            className={`aac-tile ${hidden ? "hidden-tile" : ""} ${moving && !isSelectingForChat ? "moving-tile" : ""} ${isChatSelected ? "chat-selected-tile" : ""}`}
             tabIndex={isInactiveSlot ? -1 : undefined}
+            aria-pressed={isSelectingForChat && tile?.kind === "word" && !hidden ? isChatSelected : undefined}
             aria-label={
-                hidden && !editing
+                hidden && !effectiveEditing
                     ? "Empty slot"
                     : tile
-                      ? `${tile.kind === "folder" ? "Open folder: " : ""}${tile.label}${hidden ? " (hidden)" : ""}${editing ? ", edit tile" : ""}`
-                      : editing
+                      ? `${tile.kind === "folder" ? "Open folder: " : ""}${tile.label}${hidden ? " (hidden)" : ""}${isChatSelected ? `, selected (${selectedCount})` : ""}${effectiveEditing ? ", edit tile" : ""}`
+                      : effectiveEditing
                         ? "Add tile"
                         : "Empty slot"
             }
-            aria-disabled={isInactiveSlot && !onMove}
+            aria-disabled={isInactiveSlot && (!onMove || isSelectingForChat)}
         >
-            {tile && (!hidden || editing) ? (
-                <TileVisual tile={tile} color={actualColor} appearance={appearance} />
+            {tile && (!hidden || effectiveEditing) ? (
+                <div className="relative h-full w-full">
+                    <TileVisual tile={tile} color={actualColor} appearance={appearance} />
+                    {isChatSelected && (
+                        <span className="chat-tile-badge" aria-hidden="true">
+                            {selectedCount > 1 ? selectedCount : (
+                                <svg
+                                    width="12"
+                                    height="12"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2.5"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                >
+                                    <path d="m5 12 4 4L19 6" />
+                                </svg>
+                            )}
+                        </span>
+                    )}
+                </div>
             ) : (
                 <span aria-hidden="true" className="empty-slot">
-                    {editing || onMove ? "+" : ""}
+                    {effectiveEditing || (onMove && !isSelectingForChat) ? "+" : ""}
                 </span>
             )}
         </button>

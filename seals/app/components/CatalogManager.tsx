@@ -28,7 +28,7 @@ export default function CatalogManager({ onClose }: { onClose: () => void }) {
             onClose={onClose}
             className="w-full max-w-2xl max-h-[90dvh] overflow-hidden rounded-3xl border border-[#DCEEFF] bg-white p-0 text-[#465365] shadow-2xl"
         >
-            <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-[#FFF9EC] px-6 py-4">
+            <div className="flex items-center justify-between gap-3 border-b border-[#DCEEFF] bg-[#F2F8FF] px-6 py-4">
                 <div>
                     <h2 className="font-heading text-lg font-extrabold">Catalogs &amp; Boards</h2>
                     <p className="text-xs text-[#465365]/75">
@@ -68,7 +68,7 @@ export default function CatalogManager({ onClose }: { onClose: () => void }) {
                                 </span>
                                 <span>
                                     <span className="block font-heading font-bold">
-                                        {b.name} {b.isBuiltIn && <span className="rounded-md border border-slate-200 bg-[#FFF9EC] px-2 py-0.5 text-[10px] uppercase">Built-in</span>}
+                                        {b.name} {b.isBuiltIn && <span className="rounded-md border border-[#DCEEFF] bg-[#F2F8FF] px-2 py-0.5 text-[10px] uppercase">Built-in</span>}
                                     </span>
                                     <span className="text-xs text-[#465365]/70">{count} {count === 1 ? "tile" : "tiles"}</span>
                                 </span>
@@ -113,7 +113,7 @@ export default function CatalogManager({ onClose }: { onClose: () => void }) {
                 })}
                 {s.message && <p role="status">{s.message}</p>}
                 {canManage && !isPreset && s.selected && (
-                    <div ref={formRef} className="space-y-3 rounded-2xl border border-slate-200 bg-[#FFF9EC]/70 p-4">
+                    <div ref={formRef} className="space-y-3 rounded-2xl border border-[#DCEEFF] bg-[#F2F8FF] p-4">
                         <div className="flex justify-between">
                             <h3 className="font-heading text-xs font-bold uppercase">{s.selected === "new" ? "Create catalog" : "Edit catalog"}</h3>
                             <button type="button" onClick={a.reset} className="text-xs font-semibold">Cancel</button>

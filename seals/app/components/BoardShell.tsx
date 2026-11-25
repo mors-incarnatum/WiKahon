@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import type * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import { BoardPageMemoryContext, createBoardPageMemory } from "@/viewmodels/boardPageMemory";
-import { resolveBoardTileColor, type Tile, type ColorKey } from "@/lib/board";
+import { resolveBoardTileColor, resolveTokenColor, type Tile, type ColorKey, type SentenceToken, type ColorMode, type ColorSystemId } from "@/lib/board";
 import { useMediaUrl } from "@/viewmodels/useMediaUrl";
 import { ChatDraftContext } from "@/viewmodels/useChatDraftViewModel";
 /* eslint-disable @next/next/no-img-element */
@@ -17,12 +17,23 @@ import BoardSettings from "./BoardSettings";
 import CatalogManager from "./CatalogManager";
 import CategoryWheel from "./CategoryWheel";
 
-type IconName = "volume" | "edit" | "check" | "folder" | "settings";
+type IconName =
+    | "volume"
+    | "edit"
+    | "check"
+    | "folder"
+    | "settings"
+    | "keyboard"
+    | "chat"
+    | "scribble"
+    | "back"
+    | "speech"
+    | "remove";
 
-function HeaderIcon({ name }: { name: IconName }) {
+function HeaderIcon({ name, size = 22 }: { name: IconName; size?: number }) {
     const common = {
-        width: 22,
-        height: 22,
+        width: size,
+        height: size,
         viewBox: "0 0 24 24",
         fill: "none",
         stroke: "currentColor",
@@ -67,7 +78,77 @@ function HeaderIcon({ name }: { name: IconName }) {
                     <path d="m19.4 15 .1.1a1.7 1.7 0 0 1-2.4 2.4l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a1.7 1.7 0 0 1-3.4 0v-.2a1.7 1.7 0 0 0-2.9-1.2l-.1.1a1.7 1.7 0 0 1-2.4-2.4l.1-.1a1.7 1.7 0 0 0-1.2-2.9H4a1.7 1.7 0 0 1 0-3.4h.2a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a1.7 1.7 0 0 1 2.4-2.4l.1.1a1.7 1.7 0 0 0 2.9-1.2V4a1.7 1.7 0 0 1 3.4 0v.2a1.7 1.7 0 0 0 2.9 1.2l.1-.1a1.7 1.7 0 0 1 2.4 2.4l.1.1a1.7 1.7 0 0 0 1.2 2.9h.2a1.7 1.7 0 0 1 0 3.4h-.2a1.7 1.7 0 0 0-1.2 2.9z" />
                 </svg>
             );
+        case "keyboard":
+            return (
+                <svg {...common}>
+                    <rect x="2" y="5" width="20" height="14" rx="2" />
+                    <path d="M6 9h1M10 9h1M14 9h1M17 9h1" />
+                    <path d="M6 12.5h1M10 12.5h1M14 12.5h1M17 12.5h1" />
+                    <path d="M8 16h8" />
+                </svg>
+            );
+        case "chat":
+        case "speech":
+            return (
+                <svg {...common}>
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+            );
+        case "scribble":
+            return (
+                <svg {...common}>
+                    <path d="M12 20h9" />
+                    <path d="m16.5 3.5 4 4L8 20l-5 1 1-5z" />
+                </svg>
+            );
+        case "back":
+            return (
+                <svg {...common}>
+                    <path d="m15 18-6-6 6-6" />
+                </svg>
+            );
+        case "remove":
+            return (
+                <svg {...common}>
+                    <path d="m6 6 12 12M18 6 6 18" />
+                </svg>
+            );
     }
+}
+
+function SelectionTokenChip({
+    token,
+    colorMode,
+    colorSystem,
+    onRemove,
+}: {
+    token: SentenceToken;
+    colorMode: ColorMode;
+    colorSystem: ColorSystemId;
+    onRemove: () => void;
+}) {
+    const { src } = useMediaUrl(token.iconName, token.mediaId);
+    const color = resolveTokenColor(token, colorMode, colorSystem);
+    const p = palette[color] ?? palette.slate;
+
+    return (
+        <button
+            type="button"
+            className="chat-selection-token"
+            style={{
+                backgroundColor: p.surface,
+                borderColor: p.border,
+                color: p.text,
+            }}
+            onClick={onRemove}
+            aria-label={`Remove ${token.label}`}
+        >
+            {token.iconName === "speech" && !token.mediaId && <HeaderIcon name="speech" size={16} />}
+            {src && <img src={src} alt="" width={20} height={20} draggable={false} />}
+            <span>{token.label}</span>
+            <HeaderIcon name="remove" size={14} />
+        </button>
+    );
 }
 
 function PinnedTile({
@@ -171,13 +252,13 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     <b>W</b> WiKahon
                                 </Link>
 
-                                {!vm.state.isChatOpen && !vm.state.isScribbleOpen && (
+                                {!vm.state.isChatOpen && !vm.state.isScribbleOpen && !isComposing && (
                                     <div style={{ flex: 1, minWidth: 0 }}>
                                         <SentenceStrip />
                                     </div>
                                 )}
 
-                                {!vm.state.isScribbleOpen && (
+                                {!vm.state.isScribbleOpen && !isComposing && (
                                     <div
                                         className="header-tools"
                                         style={{
@@ -300,9 +381,10 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                         zIndex: 50,
                                         width: 24,
                                         height: 48,
-                                        backgroundColor: "#FFF9EC",
-                                        border: "1px solid #DCEEFF",
-                                        borderLeft: sidebarOpen ? "1px solid #DCEEFF" : "none",
+                                        backgroundColor: palette.blue.bg,
+                                        color: palette.blue.text,
+                                        border: `1px solid ${palette.blue.border}`,
+                                        borderLeft: sidebarOpen ? `1px solid ${palette.blue.border}` : "none",
                                         borderTopRightRadius: 6,
                                         borderBottomRightRadius: 6,
                                         display: "flex",
@@ -322,8 +404,9 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                         style={{
                                             width: 240,
                                             flexShrink: 0,
-                                            borderRight: "1px solid #DCEEFF",
-                                            backgroundColor: "#FFF9EC",
+                                            borderRight: `1px solid ${palette.blue.border}`,
+                                            backgroundColor: palette.blue.bg,
+                                            color: palette.blue.text,
                                             padding: "16px 12px",
                                             display: "flex",
                                             flexDirection: "column",
@@ -332,26 +415,23 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     >
                                         <div
                                             style={{
-                                                paddingBottom: 12,
-                                                borderBottom: "1px solid #DCEEFF",
-                                                textAlign: "left",
+                                                padding: "4px 4px 14px",
+                                                borderBottom: `1px solid ${palette.blue.border}`,
+                                                display: "flex",
+                                                justifyContent: "center",
                                             }}
                                         >
-                                            {vm.state.isGuardian ? (
-                                                <span
-                                                    className="profile-badge"
-                                                    aria-label={`Signed in guardian: ${vm.state.currentUser.name}`}
-                                                >
-                                                    🔑 {vm.state.currentUser.name}
-                                                </span>
-                                            ) : (
-                                                <span
-                                                    className="profile-badge"
-                                                    aria-label={`Signed in child: ${vm.state.currentUser.name}`}
-                                                >
-                                                    👶 {vm.state.currentUser.name}
-                                                </span>
-                                            )}
+                                            <span
+                                                className="profile-badge sidebar-user-title"
+                                                aria-label={`${vm.state.isGuardian ? "Signed in guardian" : "Signed in child"}: ${vm.state.currentUser.name}`}
+                                                style={{
+                                                    backgroundColor: palette.blue.surface,
+                                                    borderColor: palette.blue.border,
+                                                    color: palette.blue.text,
+                                                }}
+                                            >
+                                                {vm.state.currentUser.name}
+                                            </span>
                                         </div>
 
                                         <div
@@ -371,19 +451,29 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                                         background: "transparent",
                                                         border: "none",
                                                         borderBottom:
-                                                            vm.state.featureFlags?.parentChildChat &&
-                                                            !isComposing ||
+                                                            (vm.state.featureFlags?.parentChildChat &&
+                                                                !isComposing) ||
                                                             vm.state.canSyncCloud
-                                                                ? "1px solid rgba(220, 238, 255, 0.6)"
+                                                                ? `1px solid ${palette.blue.surface}`
                                                                 : "none",
                                                         cursor: "pointer",
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        gap: 8,
+                                                        color: palette.blue.text,
                                                     }}
                                                     aria-pressed={vm.state.isScribbleOpen}
                                                     onClick={vm.actions.toggleScribble}
                                                 >
-                                                    {vm.state.isScribbleOpen
-                                                        ? "↩ Back to board"
-                                                        : "✍ Scribble"}
+                                                    <HeaderIcon
+                                                        name={vm.state.isScribbleOpen ? "back" : "scribble"}
+                                                        size={18}
+                                                    />
+                                                    <span>
+                                                        {vm.state.isScribbleOpen
+                                                            ? "Back to board"
+                                                            : "Scribble"}
+                                                    </span>
                                                 </button>
                                             )}
 
@@ -399,12 +489,13 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                                             background: "transparent",
                                                             border: "none",
                                                             borderBottom: vm.state.canSyncCloud
-                                                                ? "1px solid rgba(220, 238, 255, 0.6)"
+                                                                ? `1px solid ${palette.blue.surface}`
                                                                 : "none",
                                                             cursor: "pointer",
                                                             display: "flex",
                                                             alignItems: "center",
                                                             justifyContent: "space-between",
+                                                            color: palette.blue.text,
                                                         }}
                                                         aria-pressed={vm.state.isChatOpen}
                                                         aria-label={
@@ -416,13 +507,18 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                                         }
                                                         onClick={vm.actions.toggleChat}
                                                     >
-                                                        <span>
-                                                            💬{" "}
-                                                            {vm.state.isChatOpen
-                                                                ? "Back to board"
-                                                                : vm.chatDraft.state.hasDraft
-                                                                  ? "Resume chat"
-                                                                  : "Chat"}
+                                                        <span className="inline-flex items-center gap-2">
+                                                            <HeaderIcon
+                                                                name={vm.state.isChatOpen ? "back" : "chat"}
+                                                                size={18}
+                                                            />
+                                                            <span>
+                                                                {vm.state.isChatOpen
+                                                                    ? "Back to board"
+                                                                    : vm.chatDraft.state.hasDraft
+                                                                      ? "Resume chat"
+                                                                      : "Chat"}
+                                                            </span>
                                                         </span>
                                                         {vm.state.unreadChatCount > 0 && (
                                                             <span
@@ -448,6 +544,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                                         border: "none",
                                                         borderBottom: "none",
                                                         cursor: "pointer",
+                                                        color: palette.blue.text,
                                                     }}
                                                     disabled={vm.state.syncingCloud}
                                                     onClick={() => void vm.actions.syncCloudNow()}
@@ -475,7 +572,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                                 padding: "10px 8px",
                                                 background: "transparent",
                                                 border: "none",
-                                                borderTop: "1px solid rgba(220, 238, 255, 0.6)",
+                                                borderTop: `1px solid ${palette.blue.border}`,
                                                 color: "#991b1b",
                                                 cursor: "pointer",
                                             }}
@@ -532,6 +629,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
 
                                     {!vm.state.isChatOpen &&
                                         !vm.state.isScribbleOpen &&
+                                        !isComposing &&
                                         vm.state.isGuardian &&
                                         vm.edit.state.isEditMode && (
                                             <p className="edit-notice" role="status">
@@ -565,9 +663,9 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                                             tile={tile}
                                                             color={color}
                                                             onActivate={() =>
-                                                                vm.sentence.actions.onTileActivate(
-                                                                    tile,
-                                                                )
+                                                                isComposing
+                                                                    ? vm.chatDraft.actions.selectTile(tile)
+                                                                    : vm.sentence.actions.onTileActivate(tile)
                                                             }
                                                         />
                                                     );
@@ -578,33 +676,65 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     {isComposing &&
                                         !vm.state.isChatOpen &&
                                         !vm.state.isScribbleOpen && (
-                                            <div
-                                                className="chat-composition-controls"
-                                                role="group"
-                                                aria-label="Add board words to chat"
+                                            <section
+                                                className="chat-selection-panel"
+                                                role="region"
+                                                aria-label="Select words for chat"
                                             >
-                                                <span>Select words for your chat message</span>
-                                                <button
-                                                    ref={addWordsRef}
-                                                    type="button"
-                                                    className="primary"
-                                                    disabled={
-                                                        !vm.chatDraft.state.hasUnusedWords
-                                                    }
-                                                    onClick={vm.actions.addWordsToChat}
+                                                <div className="chat-selection-header">
+                                                    <span className="chat-selection-title">
+                                                        Select words
+                                                    </span>
+                                                    <span className="chat-selection-subtitle">
+                                                        For chat
+                                                    </span>
+                                                </div>
+                                                <div
+                                                    className="chat-selection-tokens"
+                                                    aria-live="polite"
+                                                    aria-relevant="additions removals"
                                                 >
-                                                    Add words to chat
-                                                </button>
-                                                <button
-                                                    ref={cancelCompositionRef}
-                                                    type="button"
-                                                    onClick={
-                                                        vm.actions.cancelChatComposition
-                                                    }
-                                                >
-                                                    Cancel and resume chat
-                                                </button>
-                                            </div>
+                                                    {vm.chatDraft.state.selectedTokens.length === 0 ? (
+                                                        <span className="sentence-placeholder">
+                                                            Tap board tiles to select words for chat
+                                                        </span>
+                                                    ) : (
+                                                        vm.chatDraft.state.selectedTokens.map(token => (
+                                                            <SelectionTokenChip
+                                                                key={token.instanceId}
+                                                                token={token}
+                                                                colorMode={vm.sentence.state.colorMode}
+                                                                colorSystem={vm.sentence.state.colorSystem}
+                                                                onRemove={() =>
+                                                                    vm.chatDraft.actions.removeSelectedToken(
+                                                                        token.instanceId,
+                                                                    )
+                                                                }
+                                                            />
+                                                        ))
+                                                    )}
+                                                </div>
+                                                <div className="chat-selection-actions">
+                                                    <button
+                                                        ref={addWordsRef}
+                                                        type="button"
+                                                        className="primary chat-selection-add"
+                                                        disabled={!vm.chatDraft.state.hasSelectedWords}
+                                                        onClick={vm.actions.addWordsToChat}
+                                                    >
+                                                        <HeaderIcon name="keyboard" size={20} />
+                                                        <span>Add to chat</span>
+                                                    </button>
+                                                    <button
+                                                        ref={cancelCompositionRef}
+                                                        type="button"
+                                                        className="chat-selection-cancel"
+                                                        onClick={vm.actions.cancelChatComposition}
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            </section>
                                         )}
 
                                     <main
@@ -630,7 +760,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                         {children}
                                     </main>
 
-                                    {vm.state.isGuardian &&
+                                    {vm.state.canConfigureLayout &&
                                         !vm.state.isChatOpen &&
                                         !vm.state.isScribbleOpen && (
                                             <button
@@ -716,7 +846,7 @@ export default function BoardShell({ children }: { children: React.ReactNode }) 
                                     />
                                 )}
 
-                            {vm.state.isGuardian && vm.state.panel === "layout" && (
+                            {vm.state.canConfigureLayout && vm.state.panel === "layout" && (
                                 <BoardSettings
                                     boardId={vm.state.boardId}
                                     onClose={() => vm.actions.setPanel(null)}

@@ -3,7 +3,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { isGuardianRole, LOCAL_CHILD_SESSION } from "@/models/auth";
-import type { Tile } from "@/lib/board";
+import { createSentenceToken, type Tile } from "@/lib/board";
 import { chatSocketService } from "@/services/chat/chatSocketService";
 import { cloudSyncService } from "@/services/cloud/cloudSyncService";
 import { discardPreparedMedia } from "@/services/storage/mediaRepository";
@@ -85,7 +85,12 @@ export function useBoardShellViewModel() {
         router.push(scope === profileScope ? path : "/board");
     };
 
-    const chatDraft = useChatDraftViewModel(profileScope, sentence.state.tokens, returnToBoard);
+    const createChatToken = (tile: Tile, targetBoardId?: string) => {
+        const latest = storeApi.getState();
+        return createSentenceToken(tile, latest.boards, latest.colorSystem ?? "custom", targetBoardId);
+    };
+
+    const chatDraft = useChatDraftViewModel(profileScope, returnToBoard, createChatToken);
 
     useEffect(() => {
         if (!syncStatus) return;
@@ -106,6 +111,8 @@ export function useBoardShellViewModel() {
     }, [ready, currentUser, router]);
 
     const isGuardian = isGuardianRole(currentUser?.role);
+    const childLayoutEnabled = Boolean(featureFlags?.childBoardLayout);
+    const canConfigureLayout = isGuardian || childLayoutEnabled;
     const wheelEnabled = featureFlags?.categoryWheel ?? false;
     const pinnedEnabled = featureFlags?.pinnedVocabulary ?? false;
 
@@ -127,11 +134,11 @@ export function useBoardShellViewModel() {
     const wheel = currentUser && wheelState?.userId === currentUser.id ? wheelState.coords : null;
 
     const gatedLocalPanel: LocalPanel =
-        !isGuardian &&
-        (localPanel === "settings" ||
-            localPanel === "profiles" ||
-            localPanel === "catalogs" ||
-            localPanel === "layout")
+        (!isGuardian &&
+            (localPanel === "settings" ||
+                localPanel === "profiles" ||
+                localPanel === "catalogs")) ||
+        (localPanel === "layout" && !canConfigureLayout)
             ? null
             : localPanel;
 
@@ -141,24 +148,24 @@ export function useBoardShellViewModel() {
 
     const senderRole = isGuardian ? "guardian" : "child";
 
-    const chatScopeKey = currentUser
-        ? chatReadScopeKey(currentUser.id, activeProfileId, cloudProfileId)
+    const boundChatContext = resolveChatBindingContext(currentUser, activeProfileId, cloudProfileId);
+    const chatScopeKey = boundChatContext
+        ? chatReadScopeKey(boundChatContext.userId, boundChatContext.localProfileId, boundChatContext.cloudProfileId)
         : null;
 
     const lastReadAt = chatScopeKey ? chatLastReadAt[chatScopeKey] : undefined;
 
     const unreadChatCount =
-        !currentUser || isChatOpen
+        !boundChatContext || isChatOpen
             ? 0
-            : countUnreadChatMessages(chatMessages ?? [], currentUser.id, senderRole, lastReadAt);
+            : countUnreadChatMessages(chatMessages ?? [], boundChatContext.userId, senderRole, lastReadAt);
 
     useEffect(() => {
-        if (isChatOpen && currentUser) {
+        if (isChatOpen && chatScopeKey) {
             markChatRead();
         }
-    }, [isChatOpen, currentUser, activeProfileId, cloudProfileId, chatMessages, markChatRead]);
+    }, [isChatOpen, chatScopeKey, chatMessages, markChatRead]);
 
-    const boundChatContext = resolveChatBindingContext(currentUser, activeProfileId, cloudProfileId);
     const boundUserId = boundChatContext?.userId ?? null;
     const boundLocalProfileId = boundChatContext?.localProfileId ?? null;
     const boundCloudProfileId = boundChatContext?.cloudProfileId ?? null;
@@ -186,16 +193,17 @@ export function useBoardShellViewModel() {
 
     const setPanel = (next: ShellPanel) => {
         if (
-            !isGuardian &&
-            (next === "settings" ||
-                next === "profiles" ||
-                next === "catalogs" ||
-                next === "layout")
+            (!isGuardian &&
+                (next === "settings" ||
+                    next === "profiles" ||
+                    next === "catalogs")) ||
+            (next === "layout" && !canConfigureLayout)
         ) {
             return;
         }
 
         if (next === "chat") {
+            chatDraft.actions.exitSelectionMode();
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
 
             if (pathname !== "/chat") {
@@ -210,6 +218,7 @@ export function useBoardShellViewModel() {
         }
 
         if (next === "scribble") {
+            chatDraft.actions.exitSelectionMode();
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
 
             if (pathname !== "/scribble") {
@@ -308,6 +317,7 @@ export function useBoardShellViewModel() {
     };
 
     const logout = () => {
+        chatDraft.actions.exitSelectionMode();
         setLocalPanelState({ userId: null, panel: null });
         setWheelState(null);
         setSyncStatus(null);
@@ -330,6 +340,7 @@ export function useBoardShellViewModel() {
             ready,
             currentUser,
             isGuardian,
+            canConfigureLayout,
             panel: activePanel,
             isChatOpen,
             unreadChatCount,

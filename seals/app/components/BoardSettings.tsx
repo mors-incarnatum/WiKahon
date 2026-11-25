@@ -23,7 +23,7 @@ function Segmented<T extends string>({ label, value, options, onChange }: {
                 {options.map(option => (
                     <button key={option.value} type="button" aria-pressed={value === option.value}
                         onClick={() => onChange(option.value)}
-                        className={`rounded-xl border px-3 py-2 text-xs font-bold ${value === option.value ? "border-[#B6D8FA] bg-[#DCEEFF]" : "border-slate-200 bg-[#FFF9EC]/50"}`}>
+                        className={`rounded-xl border px-3 py-2 text-xs font-bold ${value === option.value ? "border-[#B6D8FA] bg-[#DCEEFF]" : "border-[#DCEEFF] bg-[#F2F8FF]"}`}>
                         {option.label}
                     </button>
                 ))}
@@ -142,7 +142,7 @@ export default function BoardSettings({
                 maxHeight: "85vh",
             }}
         >
-            <div className="modal-heading sticky top-0 z-10 rounded-2xl bg-[#FFF9EC] p-4">
+            <div className="modal-heading sticky top-0 z-10 rounded-2xl border border-[#DCEEFF] bg-[#F2F8FF] p-4">
                 <h2>
                     {initialTab === "layout"
                         ? "Board Layout"
@@ -321,7 +321,7 @@ export default function BoardSettings({
                         )}
 
                         {s.draftMode === "automatic" && (
-                            <div className="settings-section rounded-2xl border border-slate-200 bg-[#FFF9EC] p-4">
+                            <div className="settings-section rounded-2xl border border-[#DCEEFF] bg-[#F2F8FF] p-4">
                                 <p>
                                     The board automatically adjusts its rows and columns according
                                     to the available space, tile dimensions, and grid gap.
@@ -484,7 +484,7 @@ export default function BoardSettings({
                             aria-pressed={s.tab === "experiments"}
                             onClick={() => a.setTab("experiments")}
                         >
-                            Optional prototypes
+                            Toggle features
                         </button>
                     </div>
 
@@ -494,7 +494,7 @@ export default function BoardSettings({
                             <span>Color coding system</span>
                             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                                 {(Object.keys(COLOR_SYSTEMS) as ColorSystemId[]).map(id => (
-                                    <button key={id} type="button" aria-pressed={s.draftColorSystem === id} onClick={() => a.setDraftColorSystem(id)} className={`rounded-xl border px-3 py-2.5 text-xs font-bold ${s.draftColorSystem === id ? "border-[#B6D8FA] bg-[#DCEEFF]" : "border-slate-200 bg-[#FFF9EC]/50"}`}>
+                                    <button key={id} type="button" aria-pressed={s.draftColorSystem === id} onClick={() => a.setDraftColorSystem(id)} className={`rounded-xl border px-3 py-2.5 text-xs font-bold ${s.draftColorSystem === id ? "border-[#B6D8FA] bg-[#DCEEFF]" : "border-[#DCEEFF] bg-[#F2F8FF]"}`}>
                                         {COLOR_SYSTEMS[id].label}
                                     </button>
                                 ))}
@@ -937,7 +937,7 @@ export default function BoardSettings({
                                 {s.provisionedChildren.length > 0 && (
                                     <>
                                         <h4>Child accounts</h4>
-                                        <ul className="space-y-3">
+                                        <ul className="mb-3 space-y-3">
                                             {s.provisionedChildren.map(child => {
                                                 const isEditing = s.editingChildId === child.userId;
                                                 const isResetting = s.resettingChildId === child.userId;
@@ -1281,9 +1281,9 @@ export default function BoardSettings({
                     </fieldset>
 
                     <fieldset hidden={s.tab !== "experiments"}>
-                        <legend>Optional feature prototypes (off by default)</legend>
+                        <legend>Toggle features</legend>
                         <p>
-                            Disabling a prototype hides its entry points without deleting saved
+                            Disabling a feature hides its entry points without deleting saved
                             content.
                         </p>
                         <label>
@@ -1349,6 +1349,16 @@ export default function BoardSettings({
                                 }
                             />{" "}
                             Pinned core vocabulary bar
+                        </label>
+                        <label>
+                            <input
+                                type="checkbox"
+                                checked={s.featureFlags?.childBoardLayout ?? false}
+                                onChange={e =>
+                                    a.setFeatureFlags({ childBoardLayout: e.target.checked })
+                                }
+                            />{" "}
+                            Child view board layout settings control
                         </label>
                     </fieldset>
                 </>

@@ -29,7 +29,20 @@ function TargetSymbol({ tile }: { tile: TargetTile }) {
                     draggable={false}
                 />
             ) : tile.iconName === "speech" && !tile.mediaId ? (
-                <span aria-hidden="true" className="text-3xl">💬</span>
+                <svg
+                    width={32}
+                    height={32}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.8}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                    className="h-8 w-8 shrink-0 text-sky-800"
+                >
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
             ) : null}
             <div className="min-w-0">
                 <span className="block text-xs font-semibold uppercase tracking-wide">Trace this word</span>
@@ -134,7 +147,7 @@ export default function ScribblePracticeModal() {
                                     onClick={() => a.speakText(s.targetTile?.spokenText || s.targetTile?.label)}
                                     className={choice}
                                 >
-                                    🔊 Hear target
+                                    Hear target
                                 </button>
                             </div>
                             {s.targetTile && (
@@ -218,7 +231,7 @@ export default function ScribblePracticeModal() {
                     onClick={() => a.speakText()}
                     className="ml-auto min-h-11 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-sky-700 disabled:opacity-50 sm:ml-0"
                 >
-                    <span aria-hidden="true">🔊</span> Speak
+                    Speak
                 </button>
                 <button
                     type="button"

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { isGuardianRole } from "@/models/auth";
+import { useEffect, useMemo, useState } from "react";
+import { isGuardianRole, LOCAL_CHILD_SESSION } from "@/models/auth";
 import { useBoardStore, useBoardStoreApi } from "@/store/BoardProvider";
 import { createBoundChatSocketHandlers, matchesChatBindingContext, resolveChatBindingContext } from "@/store/useBoardStore";
 import { useChatDraftContext } from "@/viewmodels/useChatDraftViewModel";
@@ -28,7 +28,19 @@ export function useParentChatViewModel(
     const currentUser = useBoardStore(s => s.currentUser);
     const activeProfileId = useBoardStore(s => s.activeProfileId);
     const cloudProfileId = useBoardStore(s => s.cloudProfileId);
-    const messages = useBoardStore(s => s.experimentalData?.chatMessages) ?? EMPTY_MESSAGES;
+    const colorSystem = useBoardStore(s => s.colorSystem ?? "custom");
+    const colorMode = useBoardStore(s =>
+        (s.colorSystem ?? "custom") === "custom" ? s.tileAppearance.colorMode : "catalog",
+    );
+    const storedMessages = useBoardStore(s => s.experimentalData?.chatMessages) ?? EMPTY_MESSAGES;
+    const currentUserId = currentUser?.id ?? null;
+    const messages = useMemo(() => {
+        if (!currentUserId) return EMPTY_MESSAGES;
+        if (currentUserId === LOCAL_CHILD_SESSION.user.id) {
+            return storedMessages.filter(message => message.verified !== true && !message.pendingContext);
+        }
+        return storedMessages;
+    }, [currentUserId, storedMessages]);
     const addChatMessage = useBoardStore(s => s.addChatMessage);
     const dismissLegacyMessages = useBoardStore(s => s.dismissLegacyChatMessages);
     const scope = JSON.stringify([currentUser?.id, activeProfileId, cloudProfileId]);
@@ -37,17 +49,17 @@ export function useParentChatViewModel(
     const draft = chatDraft.state.text;
     const sendError = errorEntry?.scope === scope ? errorEntry.text : null;
     const loadOlderError = loadOlderErrorEntry?.scope === scope ? loadOlderErrorEntry.text : null;
-    const [connectionStatus, setConnectionStatus] = useState<ChatConnectionStatus>(() =>
-        socketService.getStatus(),
-    );
-    const [historyMeta, setHistoryMeta] = useState<ChatHistoryMeta>(() =>
-        socketService.getHistoryMeta(),
-    );
+    const [connectionEntry, setConnectionEntry] = useState<{ scope: string; status: ChatConnectionStatus } | null>(null);
+    const [historyEntry, setHistoryEntry] = useState<{ scope: string; meta: ChatHistoryMeta } | null>(null);
 
     const boundChatContext = resolveChatBindingContext(currentUser, activeProfileId, cloudProfileId);
     const boundUserId = boundChatContext?.userId ?? null;
     const boundLocalProfileId = boundChatContext?.localProfileId ?? null;
     const boundCloudProfileId = boundChatContext?.cloudProfileId ?? null;
+    const connectionStatus: ChatConnectionStatus = boundChatContext && connectionEntry?.scope === scope
+        ? connectionEntry.status
+        : socketService.isConfigured() ? "unlinked" : "unconfigured";
+    const historyMeta = boundChatContext && historyEntry?.scope === scope ? historyEntry.meta : null;
 
     useEffect(() => {
         const activeContext =
@@ -74,8 +86,8 @@ export function useParentChatViewModel(
             onSendError: (error, context) => {
                 if (matchesChatBindingContext(storeApi.getState(), context)) setErrorEntry({ scope, text: error });
             },
-            onStatusChange: setConnectionStatus,
-            onHistoryMetaChange: setHistoryMeta,
+            onStatusChange: status => setConnectionEntry({ scope, status }),
+            onHistoryMetaChange: meta => setHistoryEntry({ scope, meta }),
         });
     }, [socketService, storeApi, scope, boundUserId, boundLocalProfileId, boundCloudProfileId]);
 
@@ -115,14 +127,18 @@ export function useParentChatViewModel(
     };
 
     const reconnect = () => {
+        if (!boundChatContext || !matchesChatBindingContext(storeApi.getState(), boundChatContext)) return;
         setErrorEntry(null);
         socketService.reconnect();
     };
 
     const loadOlderMessages = async () => {
+        if (!boundChatContext || !matchesChatBindingContext(storeApi.getState(), boundChatContext)) {
+            return { ok: false, loadedCount: 0, hasMore: false };
+        }
         setLoadOlderErrorEntry(null);
         const res = await socketService.loadOlderMessages();
-        if (!res.ok && boundChatContext && matchesChatBindingContext(storeApi.getState(), boundChatContext)) {
+        if (!res.ok && matchesChatBindingContext(storeApi.getState(), boundChatContext)) {
             setLoadOlderErrorEntry({
                 scope,
                 text: res.error ?? "Could not load older messages.",
@@ -144,12 +160,15 @@ export function useParentChatViewModel(
             messages,
             legacyMessageCount: messages.filter(m => m.verified !== true && !m.pendingContext).length,
             hasPendingMessages: messages.some(m => m.verified !== true && m.pendingContext),
-            hasMoreHistory: historyMeta.hasMore,
-            isLoadingOlder: historyMeta.loadingOlder,
+            hasMoreHistory: historyMeta?.hasMore ?? false,
+            isLoadingOlder: historyMeta?.loadingOlder ?? false,
             loadOlderError,
             draft,
+            draftTokens: chatDraft.state.draftTokens,
+            colorMode,
+            colorSystem,
             senderRole,
-            currentUserId: currentUser?.id ?? null,
+            currentUserId,
             scope,
             focusOnResume: chatDraft.state.focusOnResume,
             connectionStatus,
@@ -159,6 +178,7 @@ export function useParentChatViewModel(
         actions: {
             onClose: handleClose,
             setDraft,
+            removeDraftToken: chatDraft.actions.removeDraftToken,
             useWords: () => {
                 chatDraft.actions.beginComposition();
                 handleClose();
