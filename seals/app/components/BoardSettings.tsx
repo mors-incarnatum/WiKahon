@@ -46,7 +46,7 @@ function FieldErrors({ errors }: { errors?: string[] }) {
 export default function BoardSettings({
     boardId,
     onClose,
-    initialTab = "colorSystem",
+    initialTab = "colorSystem"
 }: {
     boardId: string;
     onClose: () => void;
@@ -132,7 +132,15 @@ export default function BoardSettings({
             label={initialTab === "layout" ? "Board layout" : "Board settings"}
             onClose={onClose}
             className="editor-modal"
-            style={{ width: "min(672px, calc(100vw - 24px))", borderRadius: "24px", borderColor: "#DCEEFF", color: "#465365", scrollPaddingTop: "100px" }}
+            style={{
+                width: "min(672px, calc(100vw - 24px))",
+                borderRadius: "24px",
+                borderColor: "#DCEEFF",
+                color: "#465365",
+                display: "flex",
+                flexDirection: "column",
+                maxHeight: "85vh",
+            }}
         >
             <div className="modal-heading sticky top-0 z-10 rounded-2xl bg-[#FFF9EC] p-4">
                 <h2>
@@ -145,6 +153,7 @@ export default function BoardSettings({
                 </button>
             </div>
 
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
             {initialTab === "layout" && (
                 <>
                     <div className="tab-row" role="group" aria-label="Board layout section">
@@ -1344,6 +1353,7 @@ export default function BoardSettings({
                     </fieldset>
                 </>
             )}
+            </div>
         </Modal>
     );
 }

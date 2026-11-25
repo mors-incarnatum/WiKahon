@@ -776,3 +776,16 @@ h4,
 .font-ui {
   font-family: var(--font-ui), sans-serif;
 }
+
+/* Keep Chat and Scribble inside the board's main content area */
+.board-route-main {
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  padding-bottom: 0;
+}
+
+.board-route-main > * {
+  min-height: 0;
+  max-height: 100%;
+}
