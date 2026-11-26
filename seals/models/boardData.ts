@@ -7,6 +7,7 @@ export interface FeatureFlags {
     scribblePractice: boolean;
     parentChildChat: boolean;
     pinnedVocabulary: boolean;
+    childBoardLayout: boolean;
 }
 
 export interface ChatMessage {
@@ -84,6 +85,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
     scribblePractice: false,
     parentChildChat: false,
     pinnedVocabulary: false,
+    childBoardLayout: false,
 };
 
 export const SAFE_MEDIA_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;

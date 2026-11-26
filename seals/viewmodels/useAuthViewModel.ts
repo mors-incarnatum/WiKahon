@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useEffect, useState } from "react";
@@ -143,7 +144,6 @@ export function useAuthViewModel(initialMode: AuthMode = "login") {
             authService.broadcastSessionRefresh();
             setPasswordState("");
             setShowPassword(false);
-            router.replace("/board");
         } catch (err) {
             setError(
                 err instanceof Error

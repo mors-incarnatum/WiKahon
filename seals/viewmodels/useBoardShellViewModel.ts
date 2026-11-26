@@ -1,8 +1,9 @@
 "use client";
+
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { isGuardianRole, LOCAL_CHILD_SESSION } from "@/models/auth";
-import type { Tile } from "@/lib/board";
+import { createSentenceToken, type Tile } from "@/lib/board";
 import { chatSocketService } from "@/services/chat/chatSocketService";
 import { cloudSyncService } from "@/services/cloud/cloudSyncService";
 import { discardPreparedMedia } from "@/services/storage/mediaRepository";
@@ -59,25 +60,37 @@ export function useBoardShellViewModel() {
     const clearStorageError = useBoardStore(s => s.clearStorageError);
     const storeLogout = useBoardStore(s => s.logout);
 
-    const [localPanelState, setLocalPanelState] = useState<{ userId: string | null; panel: LocalPanel }>({
+    const [localPanelState, setLocalPanelState] = useState<{
+        userId: string | null;
+        panel: LocalPanel;
+    }>({
         userId: null,
         panel: null,
     });
+
     const [syncingCloud, setSyncingCloud] = useState(false);
     const [syncStatus, setSyncStatus] = useState<string | null>(null);
     const [wheelState, setWheelState] = useState<{
         userId: string;
         coords: { x: number; y: number };
     } | null>(null);
+
     const lastBoardLocation = useRef({
         scope: profileScope,
         path: pathname.startsWith("/board") ? pathname : "/board",
     });
+
     const returnToBoard = () => {
         const { scope, path } = lastBoardLocation.current;
         router.push(scope === profileScope ? path : "/board");
     };
-    const chatDraft = useChatDraftViewModel(profileScope, sentence.state.tokens, returnToBoard);
+
+    const createChatToken = (tile: Tile, targetBoardId?: string) => {
+        const latest = storeApi.getState();
+        return createSentenceToken(tile, latest.boards, latest.colorSystem ?? "custom", targetBoardId);
+    };
+
+    const chatDraft = useChatDraftViewModel(profileScope, returnToBoard, createChatToken);
 
     useEffect(() => {
         if (!syncStatus) return;
@@ -98,54 +111,67 @@ export function useBoardShellViewModel() {
     }, [ready, currentUser, router]);
 
     const isGuardian = isGuardianRole(currentUser?.role);
+    const childLayoutEnabled = Boolean(featureFlags?.childBoardLayout);
+    const canConfigureLayout = isGuardian || childLayoutEnabled;
     const wheelEnabled = featureFlags?.categoryWheel ?? false;
     const pinnedEnabled = featureFlags?.pinnedVocabulary ?? false;
 
     const effectivePinnedIds =
         pinnedTileIds && pinnedTileIds.length > 0 ? pinnedTileIds : DEFAULT_PINNED_TILE_IDS;
+
     const pinnedTiles: Tile[] = pinnedEnabled
         ? effectivePinnedIds.map(id => tiles[id]).filter((t): t is Tile => Boolean(t))
         : [];
 
     const routePanel: ShellPanel =
         pathname === "/chat" ? "chat" : pathname === "/scribble" ? "scribble" : null;
+
     const localPanel: LocalPanel =
         currentUser && (localPanelState.userId === null || localPanelState.userId === currentUser.id)
             ? localPanelState.panel
             : null;
+
     const wheel = currentUser && wheelState?.userId === currentUser.id ? wheelState.coords : null;
 
     const gatedLocalPanel: LocalPanel =
-        !isGuardian &&
-        (localPanel === "settings" || localPanel === "profiles" || localPanel === "catalogs" || localPanel === "layout")
+        (!isGuardian &&
+            (localPanel === "settings" ||
+                localPanel === "profiles" ||
+                localPanel === "catalogs")) ||
+        (localPanel === "layout" && !canConfigureLayout)
             ? null
             : localPanel;
+
     const activePanel: ShellPanel = gatedLocalPanel ?? routePanel;
     const isChatOpen = pathname === "/chat";
     const isScribbleOpen = pathname === "/scribble";
 
     const senderRole = isGuardian ? "guardian" : "child";
-    const chatScopeKey = currentUser
-        ? chatReadScopeKey(currentUser.id, activeProfileId, cloudProfileId)
-        : null;
-    const lastReadAt = chatScopeKey ? chatLastReadAt[chatScopeKey] : undefined;
-    const unreadChatCount =
-        !currentUser || isChatOpen
-            ? 0
-            : countUnreadChatMessages(chatMessages ?? [], currentUser.id, senderRole, lastReadAt);
-
-    useEffect(() => {
-        if (isChatOpen && currentUser) {
-            markChatRead();
-        }
-    }, [isChatOpen, currentUser, activeProfileId, cloudProfileId, chatMessages, markChatRead]);
 
     const boundChatContext = resolveChatBindingContext(currentUser, activeProfileId, cloudProfileId);
+    const chatScopeKey = boundChatContext
+        ? chatReadScopeKey(boundChatContext.userId, boundChatContext.localProfileId, boundChatContext.cloudProfileId)
+        : null;
+
+    const lastReadAt = chatScopeKey ? chatLastReadAt[chatScopeKey] : undefined;
+
+    const unreadChatCount =
+        !boundChatContext || isChatOpen
+            ? 0
+            : countUnreadChatMessages(chatMessages ?? [], boundChatContext.userId, senderRole, lastReadAt);
+
+    useEffect(() => {
+        if (isChatOpen && chatScopeKey) {
+            markChatRead();
+        }
+    }, [isChatOpen, chatScopeKey, chatMessages, markChatRead]);
+
     const boundUserId = boundChatContext?.userId ?? null;
     const boundLocalProfileId = boundChatContext?.localProfileId ?? null;
     const boundCloudProfileId = boundChatContext?.cloudProfileId ?? null;
 
     const chatEnabled = Boolean(currentUser) && (Boolean(featureFlags?.parentChildChat) || isChatOpen);
+
     useEffect(() => {
         const activeContext =
             boundUserId && boundLocalProfileId && boundCloudProfileId
@@ -155,8 +181,11 @@ export function useBoardShellViewModel() {
                       cloudProfileId: boundCloudProfileId,
                   }
                 : null;
+
         chatSocketService.setActiveContext(activeContext);
+
         if (!chatEnabled) return;
+
         return chatSocketService.subscribe(
             createBoundChatSocketHandlers(() => storeApi.getState(), activeContext),
         );
@@ -164,62 +193,84 @@ export function useBoardShellViewModel() {
 
     const setPanel = (next: ShellPanel) => {
         if (
-            !isGuardian &&
-            (next === "settings" || next === "profiles" || next === "catalogs" || next === "layout")
+            (!isGuardian &&
+                (next === "settings" ||
+                    next === "profiles" ||
+                    next === "catalogs")) ||
+            (next === "layout" && !canConfigureLayout)
         ) {
             return;
         }
+
         if (next === "chat") {
+            chatDraft.actions.exitSelectionMode();
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
+
             if (pathname !== "/chat") {
                 if (pathname.startsWith("/board")) {
                     lastBoardLocation.current = { scope: profileScope, path: pathname };
                 }
+
                 router.push("/chat");
             }
+
             return;
         }
+
         if (next === "scribble") {
+            chatDraft.actions.exitSelectionMode();
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
+
             if (pathname !== "/scribble") {
                 if (pathname.startsWith("/board")) {
                     lastBoardLocation.current = { scope: profileScope, path: pathname };
                 }
+
                 router.push("/scribble");
             }
+
             return;
         }
+
         if (next === null) {
             if (gatedLocalPanel !== null) {
                 setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
                 return;
             }
+
             setLocalPanelState({ userId: currentUser?.id ?? null, panel: null });
+
             if (pathname === "/chat" || pathname === "/scribble") {
                 returnToBoard();
             }
+
             return;
         }
+
         setLocalPanelState({ userId: currentUser?.id ?? null, panel: next });
     };
 
     const toggleChat = () => (pathname === "/chat" ? returnToBoard() : setPanel("chat"));
-    const toggleScribble = () => (pathname === "/scribble" ? returnToBoard() : setPanel("scribble"));
+    const toggleScribble = () =>
+        pathname === "/scribble" ? returnToBoard() : setPanel("scribble");
 
     const canSyncCloud = Boolean(
         currentUser &&
-        currentUser.id !== LOCAL_CHILD_SESSION.user.id &&
-        cloudSyncService.isConfigured(),
+            currentUser.id !== LOCAL_CHILD_SESSION.user.id &&
+            cloudSyncService.isConfigured(),
     );
 
     const syncCloudNow = async () => {
         if (!canSyncCloud || !currentUser || syncingCloud) return;
+
         const snapshot = storeApi.getState();
         const userId = currentUser.id;
         const targetLocalProfileId = snapshot.activeProfileId;
         const targetCloudProfileId = snapshot.cloudProfileId;
+
         setSyncingCloud(true);
         setSyncStatus(null);
+
         try {
             const res = await cloudSyncService.syncAssignedProfileForCurrentUser(
                 userId,
@@ -228,12 +279,15 @@ export function useBoardShellViewModel() {
                 snapshot.dirty,
                 !snapshot.dirty && targetCloudProfileId ? targetLocalProfileId : undefined,
             );
+
             const latest = storeApi.getState();
+
             if (res.ok && res.updated && res.doc) {
                 const sameTarget =
                     latest.currentUser?.id === userId &&
                     latest.activeProfileId === targetLocalProfileId &&
                     latest.cloudProfileId === targetCloudProfileId;
+
                 if (sameTarget && (await latest.applySyncedCloudProfile(res.doc))) {
                     setSyncStatus("Synced from cloud");
                 } else {
@@ -243,6 +297,7 @@ export function useBoardShellViewModel() {
                     ) {
                         await discardPreparedMedia(res.doc.localProfileId);
                     }
+
                     if (sameTarget && !storeApi.getState().storageError) {
                         setSyncStatus("Cloud sync failed.");
                     }
@@ -262,6 +317,7 @@ export function useBoardShellViewModel() {
     };
 
     const logout = () => {
+        chatDraft.actions.exitSelectionMode();
         setLocalPanelState({ userId: null, panel: null });
         setWheelState(null);
         setSyncStatus(null);
@@ -270,7 +326,10 @@ export function useBoardShellViewModel() {
         router.replace("/login");
     };
 
-    const rawCategoryId = Array.isArray(params?.categoryId) ? params.categoryId[0] : params?.categoryId;
+    const rawCategoryId = Array.isArray(params?.categoryId)
+        ? params.categoryId[0]
+        : params?.categoryId;
+
     const boardId = rawCategoryId ? decodeURIComponent(rawCategoryId) : "home";
 
     return {
@@ -281,6 +340,7 @@ export function useBoardShellViewModel() {
             ready,
             currentUser,
             isGuardian,
+            canConfigureLayout,
             panel: activePanel,
             isChatOpen,
             unreadChatCount,
@@ -331,6 +391,7 @@ export function useBoardShellViewModel() {
             },
             onKeyDown: (e: React.KeyboardEvent) => {
                 if (!currentUser || !wheelEnabled || isChatOpen || isScribbleOpen) return;
+
                 if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
                     e.preventDefault();
                     setWheelState({

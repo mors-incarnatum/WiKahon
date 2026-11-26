@@ -108,6 +108,7 @@ export const FeatureFlagsSchema = z.object({
     scribblePractice: z.boolean(),
     parentChildChat: z.boolean(),
     pinnedVocabulary: z.boolean(),
+    childBoardLayout: z.boolean(),
 });
 
 export const ChatMessageSchema = z.object({

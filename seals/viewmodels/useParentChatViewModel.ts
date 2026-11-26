@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { isGuardianRole } from "@/models/auth";
+import { useEffect, useMemo, useState } from "react";
+import { isGuardianRole, LOCAL_CHILD_SESSION } from "@/models/auth";
 import { useBoardStore, useBoardStoreApi } from "@/store/BoardProvider";
-import { createBoundChatSocketHandlers, matchesChatBindingContext, resolveChatBindingContext } from "@/store/useBoardStore";
+import {
+    chatReadScopeKey,
+    chatTimestamp,
+    createBoundChatSocketHandlers,
+    filterClearedChatMessages,
+    matchesChatBindingContext,
+    resolveChatBindingContext,
+} from "@/store/useBoardStore";
 import { useChatDraftContext } from "@/viewmodels/useChatDraftViewModel";
 import type { ChatMessage } from "@/models/boardData";
 import {
@@ -28,26 +35,53 @@ export function useParentChatViewModel(
     const currentUser = useBoardStore(s => s.currentUser);
     const activeProfileId = useBoardStore(s => s.activeProfileId);
     const cloudProfileId = useBoardStore(s => s.cloudProfileId);
-    const messages = useBoardStore(s => s.experimentalData?.chatMessages) ?? EMPTY_MESSAGES;
+    const colorSystem = useBoardStore(s => s.colorSystem ?? "custom");
+    const colorMode = useBoardStore(s =>
+        (s.colorSystem ?? "custom") === "custom" ? s.tileAppearance.colorMode : "catalog",
+    );
+    const storedMessages = useBoardStore(s => s.experimentalData?.chatMessages) ?? EMPTY_MESSAGES;
+    const currentUserId = currentUser?.id ?? null;
+    const clearKey = currentUserId ? chatReadScopeKey(currentUserId, activeProfileId, cloudProfileId) : null;
+    const clearMarker = useBoardStore(s => clearKey ? s.chatClearMarkers[clearKey] : undefined);
+    const messages = useMemo(() => {
+        if (!currentUserId) return EMPTY_MESSAGES;
+        const availableMessages = currentUserId === LOCAL_CHILD_SESSION.user.id
+            ? storedMessages.filter(message => message.verified !== true && !message.pendingContext)
+            : storedMessages;
+        return clearMarker ? filterClearedChatMessages(availableMessages, clearMarker) : availableMessages;
+    }, [clearMarker, currentUserId, storedMessages]);
     const addChatMessage = useBoardStore(s => s.addChatMessage);
     const dismissLegacyMessages = useBoardStore(s => s.dismissLegacyChatMessages);
     const scope = JSON.stringify([currentUser?.id, activeProfileId, cloudProfileId]);
+    const historyScope = `${scope}:${clearMarker?.verifiedThrough ?? ""}:${clearMarker?.messageIds.length ?? 0}`;
+    const [clearEntry, setClearEntry] = useState<{
+        scope: string;
+        status: "confirm" | "error" | "cleared";
+    } | null>(null);
+    const clearStatus = clearEntry?.scope === scope ? clearEntry.status : null;
+    const canClearChat = messages.some(message => !message.pendingContext);
+    const isClearChatOpen = clearStatus === "confirm" || clearStatus === "error";
     const [errorEntry, setErrorEntry] = useState<{ scope: string; text: string; messageId?: string } | null>(null);
     const [loadOlderErrorEntry, setLoadOlderErrorEntry] = useState<{ scope: string; text: string } | null>(null);
     const draft = chatDraft.state.text;
     const sendError = errorEntry?.scope === scope ? errorEntry.text : null;
     const loadOlderError = loadOlderErrorEntry?.scope === scope ? loadOlderErrorEntry.text : null;
-    const [connectionStatus, setConnectionStatus] = useState<ChatConnectionStatus>(() =>
-        socketService.getStatus(),
-    );
-    const [historyMeta, setHistoryMeta] = useState<ChatHistoryMeta>(() =>
-        socketService.getHistoryMeta(),
-    );
+    const [connectionEntry, setConnectionEntry] = useState<{ scope: string; status: ChatConnectionStatus } | null>(null);
+    const [historyEntry, setHistoryEntry] = useState<{ scope: string; meta: ChatHistoryMeta } | null>(null);
 
     const boundChatContext = resolveChatBindingContext(currentUser, activeProfileId, cloudProfileId);
     const boundUserId = boundChatContext?.userId ?? null;
     const boundLocalProfileId = boundChatContext?.localProfileId ?? null;
     const boundCloudProfileId = boundChatContext?.cloudProfileId ?? null;
+    const connectionStatus: ChatConnectionStatus = boundChatContext && connectionEntry?.scope === scope
+        ? connectionEntry.status
+        : socketService.isConfigured() ? "unlinked" : "unconfigured";
+    const historyMeta = boundChatContext && historyEntry?.scope === scope ? historyEntry.meta : null;
+    const oldestFetchedTimestamp = chatTimestamp(historyMeta?.oldestCreatedAt);
+    const verifiedThrough = clearMarker?.verifiedThrough;
+    const reachedClearMarker = verifiedThrough != null && oldestFetchedTimestamp !== null &&
+        oldestFetchedTimestamp <= verifiedThrough;
+    const hasMoreHistory = (historyMeta?.hasMore ?? false) && !reachedClearMarker;
 
     useEffect(() => {
         const activeContext =
@@ -74,8 +108,8 @@ export function useParentChatViewModel(
             onSendError: (error, context) => {
                 if (matchesChatBindingContext(storeApi.getState(), context)) setErrorEntry({ scope, text: error });
             },
-            onStatusChange: setConnectionStatus,
-            onHistoryMetaChange: setHistoryMeta,
+            onStatusChange: status => setConnectionEntry({ scope, status }),
+            onHistoryMetaChange: meta => setHistoryEntry({ scope, meta }),
         });
     }, [socketService, storeApi, scope, boundUserId, boundLocalProfileId, boundCloudProfileId]);
 
@@ -115,14 +149,18 @@ export function useParentChatViewModel(
     };
 
     const reconnect = () => {
+        if (!boundChatContext || !matchesChatBindingContext(storeApi.getState(), boundChatContext)) return;
         setErrorEntry(null);
         socketService.reconnect();
     };
 
     const loadOlderMessages = async () => {
+        if (!boundChatContext || !matchesChatBindingContext(storeApi.getState(), boundChatContext)) {
+            return { ok: false, loadedCount: 0, hasMore: false };
+        }
         setLoadOlderErrorEntry(null);
         const res = await socketService.loadOlderMessages();
-        if (!res.ok && boundChatContext && matchesChatBindingContext(storeApi.getState(), boundChatContext)) {
+        if (!res.ok && matchesChatBindingContext(storeApi.getState(), boundChatContext)) {
             setLoadOlderErrorEntry({
                 scope,
                 text: res.error ?? "Could not load older messages.",
@@ -144,13 +182,21 @@ export function useParentChatViewModel(
             messages,
             legacyMessageCount: messages.filter(m => m.verified !== true && !m.pendingContext).length,
             hasPendingMessages: messages.some(m => m.verified !== true && m.pendingContext),
-            hasMoreHistory: historyMeta.hasMore,
-            isLoadingOlder: historyMeta.loadingOlder,
-            loadOlderError,
+            hasMoreHistory,
+            isLoadingOlder: hasMoreHistory && (historyMeta?.loadingOlder ?? false),
+            loadOlderError: reachedClearMarker ? null : loadOlderError,
             draft,
+            draftTokens: chatDraft.state.draftTokens,
+            colorMode,
+            colorSystem,
             senderRole,
-            currentUserId: currentUser?.id ?? null,
+            currentUserId,
             scope,
+            historyScope,
+            canClearChat,
+            isClearChatOpen,
+            clearChatError: clearStatus === "error" ? "Could not clear chat on this device. Try again." : null,
+            clearChatNotice: clearStatus === "cleared" ? "Chat history cleared on this device." : null,
             focusOnResume: chatDraft.state.focusOnResume,
             connectionStatus,
             isConnected: connectionStatus === "connected",
@@ -159,6 +205,7 @@ export function useParentChatViewModel(
         actions: {
             onClose: handleClose,
             setDraft,
+            removeDraftToken: chatDraft.actions.removeDraftToken,
             useWords: () => {
                 chatDraft.actions.beginComposition();
                 handleClose();
@@ -168,6 +215,16 @@ export function useParentChatViewModel(
             sendAsChild: sendMessage,
             loadOlderMessages,
             reconnect,
+            openClearChat: () => {
+                if (canClearChat) setClearEntry({ scope, status: "confirm" });
+            },
+            cancelClearChat: () => setClearEntry(null),
+            clearChat: () => {
+                if (!clearKey || !isClearChatOpen) return;
+                const cleared = storeApi.getState().clearChatHistory(clearKey);
+                setClearEntry({ scope, status: cleared ? "cleared" : "error" });
+                if (cleared) setLoadOlderErrorEntry(null);
+            },
             dismissLegacyMessages: () => {
                 if (!dismissLegacyMessages()) setSendError("Could not remove local messages from this device.");
             },

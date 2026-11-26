@@ -109,8 +109,8 @@ export default function SentenceStrip() {
     };
 
     return (
-        <section className="sentence-strip" aria-label="Sentence strip" style={{ minHeight: 64, alignItems: "stretch", gap: 10 }}>
-            <div className="sentence-tokens" aria-live="polite" aria-relevant="additions removals" style={{ minHeight: 54, padding: 6 }}>
+        <section className="sentence-strip" aria-label="Sentence strip" style={{ display: "flex", alignItems: "center", width: "100%", minHeight: 50, gap: 8 }}>
+            <div className="sentence-tokens" aria-live="polite" aria-relevant="additions removals" style={{ flex: 1, minWidth: 0, minHeight: 46, padding: "4px 6px", display: "flex", alignItems: "center", overflowX: "auto" }}>
                 {s.isEmpty && <span className="sentence-placeholder">Tap words to build a sentence</span>}
                 {s.tokens.map((t, i) => (
                     <TokenButton
@@ -126,16 +126,17 @@ export default function SentenceStrip() {
                     />
                 ))}
             </div>
-            <div className="sentence-actions" style={{ gap: 6 }}>
+            <div className="sentence-actions" style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
                 <button
                     type="button"
                     className="primary sentence-speak"
+                    style={actionButtonStyle}
                     disabled={!s.isSpeaking && s.isEmpty}
                     onClick={s.isSpeaking ? a.stopSpeaking : a.speakAll}
                     aria-label={s.isSpeaking ? "Stop speaking" : "Speak sentence"}
+                    title={s.isSpeaking ? "Stop speaking" : "Speak sentence"}
                 >
                     <SentenceIcon name={s.isSpeaking ? "stop" : "speak"} />
-                    {s.isSpeaking ? "Stop" : "Speak"}
                 </button>
                 <button
                     type="button"
@@ -150,12 +151,13 @@ export default function SentenceStrip() {
                 <button
                     ref={undoRef}
                     type="button"
+                    style={actionButtonStyle}
                     disabled={!s.canUndo}
                     onClick={a.undo}
                     aria-label="Undo last sentence edit"
                     title="Undo last sentence edit"
                 >
-                    ↶ Undo
+                    ↶
                 </button>
                 <button
                     type="button"
