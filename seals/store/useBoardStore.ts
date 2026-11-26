@@ -74,7 +74,9 @@ export interface BoardState extends BoardData {
     preReflowSnapshot: PreReflowSnapshot | null;
     currentUser: User | null;
     authSessionExpiresAt: string | null;
+    // Device-local chat preferences (never synced with the profile).
     chatLastReadAt: Record<string, string>;
+    chatClearMarkers: Record<string, ChatClearMarker>;
 
     // Auth commands
     applyAuthSession: (session: AuthSession) => { ok: boolean };
@@ -157,6 +159,7 @@ export interface BoardState extends BoardData {
     // Experimental module data (W09 - retained when disabled)
     addScribbleDraft: (text: string) => void;
     addChatMessage: (sender: ChatMessage["sender"], text: string, context: ChatBindingContext | null, id: string) => ChatMessage | null;
+    clearChatHistory: (scope: string) => boolean;
     dismissLegacyChatMessages: () => boolean;
     receiveChatMessages: (incoming: ChatMessage[], context?: ChatBindingContext) => void;
     markChatRead: () => void;
@@ -376,6 +379,46 @@ export function accountProfileOwnerId(user: User | null): string | null {
 }
 
 const CHAT_LAST_READ_STORAGE_KEY = "wikahon.chatLastReadAt.v1";
+const CHAT_CLEAR_STORAGE_KEY = "wikahon.chatClearMarkers.v1";
+
+type ChatClearMarker = {
+    verifiedThrough: number | null;
+    messageIds: string[];
+};
+
+function readChatClearMarkers(): Record<string, ChatClearMarker> {
+    if (typeof window === "undefined") return {};
+    try {
+        const raw: unknown = JSON.parse(window.localStorage.getItem(CHAT_CLEAR_STORAGE_KEY) ?? "null");
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+        return Object.fromEntries(Object.entries(raw).filter(([, marker]) =>
+            marker && (marker.verifiedThrough === null || Number.isFinite(marker.verifiedThrough)) &&
+            Array.isArray(marker.messageIds) && marker.messageIds.every((id: unknown) => typeof id === "string"),
+        ));
+    } catch {
+        return {};
+    }
+}
+
+export function chatTimestamp(createdAt?: string | null): number | null {
+    if (!createdAt) return null;
+    const milliseconds = Date.parse(createdAt);
+    if (!Number.isFinite(milliseconds)) return null;
+    // PostgreSQL keeps microseconds, while Date.parse only keeps milliseconds.
+    const fraction = createdAt.match(/\.(\d+)/)?.[1] ?? "";
+    return milliseconds * 1000 + Number(fraction.padEnd(6, "0").slice(3, 6));
+}
+
+export function filterClearedChatMessages(messages: ChatMessage[], marker: ChatClearMarker): ChatMessage[] {
+    const hiddenIds = new Set(marker.messageIds);
+    return messages.filter(message => {
+        if (message.pendingContext) return true;
+        const timestamp = message.verified ? chatTimestamp(message.createdAt) : null;
+        return timestamp === null
+            ? !hiddenIds.has(message.id)
+            : marker.verifiedThrough === null || timestamp > marker.verifiedThrough;
+    });
+}
 
 function readChatLastReadMap(): Record<string, string> {
     if (typeof window === "undefined") return {};
@@ -590,6 +633,7 @@ function buildUnauthenticatedState(previousSentenceRevision: number) {
         currentUser: null as User | null,
         authSessionExpiresAt: null as string | null,
         chatLastReadAt: {} as Record<string, string>,
+        chatClearMarkers: {} as Record<string, ChatClearMarker>,
         offlineDesignatedProfiles: [] as OfflineDesignatedProfileSummary[],
         recoverableLegacyProfiles: [] as RecoverableLegacyProfileSummary[],
     };
@@ -864,7 +908,7 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 if (authService.hasPendingLogout()) {
                     session = null;
                 }
-                set({ chatLastReadAt: readChatLastReadMap() });
+                set({ chatLastReadAt: readChatLastReadMap(), chatClearMarkers: readChatClearMarkers() });
 
                 const offlineChild = typeof navigator !== "undefined" && !navigator.onLine;
                 if (!session && offlineChild) {
@@ -2135,6 +2179,34 @@ export const createBoardStore = (profileService: LocalProfileService = localProf
                 if (!persistCurrent(data)) return null;
                 set({ ...data });
                 return message;
+            },
+
+            clearChatHistory: scope => {
+                const state = get();
+                const { currentUser, activeProfileId, cloudProfileId } = state;
+                if (!currentUser || scope !== chatReadScopeKey(currentUser.id, activeProfileId, cloudProfileId)) return false;
+                const storedMarkers = readChatClearMarkers();
+                const marker = storedMarkers[scope] ?? state.chatClearMarkers[scope];
+                const messageIds = new Set(marker?.messageIds);
+                let verifiedThrough = marker?.verifiedThrough ?? null;
+                for (const message of state.experimentalData?.chatMessages ?? []) {
+                    if (message.pendingContext) continue;
+                    if (currentUser.id === LOCAL_CHILD_SESSION.user.id && message.verified) continue;
+                    const timestamp = message.verified ? chatTimestamp(message.createdAt) : null;
+                    if (timestamp === null) {
+                        messageIds.add(message.id);
+                    } else {
+                        verifiedThrough = Math.max(verifiedThrough ?? timestamp, timestamp);
+                    }
+                }
+                const nextMarkers = { ...storedMarkers, [scope]: { verifiedThrough, messageIds: [...messageIds] } };
+                try {
+                    window.localStorage.setItem(CHAT_CLEAR_STORAGE_KEY, JSON.stringify(nextMarkers));
+                } catch {
+                    return false;
+                }
+                set({ chatClearMarkers: nextMarkers });
+                return true;
             },
 
             dismissLegacyChatMessages: () => {

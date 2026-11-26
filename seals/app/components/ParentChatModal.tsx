@@ -9,6 +9,7 @@ import { isOwnChatMessage } from "@/store/useBoardStore";
 import { useMediaUrl } from "@/viewmodels/useMediaUrl";
 import { useParentChatViewModel } from "@/viewmodels/useParentChatViewModel";
 import { useChatHistoryViewModel } from "@/viewmodels/useChatHistoryViewModel";
+import Modal from "@/app/components/Modal";
 
 function ChatLineIcon({ name }: { name: "words" | "speech" | "remove" }) {
     const common = {
@@ -103,12 +104,14 @@ export default function ParentChatModal({ onClose }: { onClose?: () => void } = 
         s.messages,
         s.currentUserId,
         s.senderRole,
-        s.scope,
+        s.historyScope,
         a.loadOlderMessages,
     );
 
     const [confirmRemoval, setConfirmRemoval] = useState(false);
     const headingRef = useRef<HTMLHeadingElement>(null);
+    const clearButtonRef = useRef<HTMLButtonElement>(null);
+    const clearDialogWasOpen = useRef(false);
     const status = CONNECTION_STATUS_META[s.connectionStatus];
 
     useEffect(() => {
@@ -118,12 +121,20 @@ export default function ParentChatModal({ onClose }: { onClose?: () => void } = 
         }
     }, [s.focusOnResume, a]);
 
+    useEffect(() => {
+        if (clearDialogWasOpen.current && !s.isClearChatOpen) {
+            if (s.canClearChat) clearButtonRef.current?.focus();
+            else headingRef.current?.focus();
+        }
+        clearDialogWasOpen.current = s.isClearChatOpen;
+    }, [s.isClearChatOpen, s.canClearChat]);
+
     return (
         <section
             aria-label="Parent-child chat"
             className="mx-auto flex min-h-0 w-full max-w-[720px] flex-1 flex-col overflow-hidden rounded-xl border border-slate-300 bg-white shadow-sm"
         >
-            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
+            <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
                 <div className="min-w-0">
                     <h2
                         ref={headingRef}
@@ -145,13 +156,24 @@ export default function ParentChatModal({ onClose }: { onClose?: () => void } = 
                     </p>
                 </div>
 
-                <button
-                    type="button"
-                    onClick={a.onClose}
-                    className="min-h-11 shrink-0 rounded-lg border border-slate-300 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700"
-                >
-                    Back to board
-                </button>
+                <div className="ml-auto flex items-center gap-2">
+                    <button
+                        ref={clearButtonRef}
+                        type="button"
+                        disabled={!s.canClearChat}
+                        onClick={a.openClearChat}
+                        className="min-h-11 rounded px-2 text-sm font-semibold text-sky-800 hover:bg-sky-100 focus-visible:outline-2 focus-visible:outline-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                        Clear chat
+                    </button>
+                    <button
+                        type="button"
+                        onClick={a.onClose}
+                        className="min-h-11 shrink-0 rounded-lg border border-slate-300 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700"
+                    >
+                        Back to board
+                    </button>
+                </div>
             </header>
 
             {(s.connectionStatus === "error" ||
@@ -220,6 +242,10 @@ export default function ParentChatModal({ onClose }: { onClose?: () => void } = 
                     )}
                 </div>
             )}
+
+            <div role="status" aria-live="polite" className="shrink-0 text-sm text-slate-700">
+                {s.clearChatNotice && <p className="border-b border-slate-200 bg-slate-50 px-3 py-2">{s.clearChatNotice}</p>}
+            </div>
 
             <div className="relative flex min-h-0 flex-1 flex-col">
                 <div
@@ -366,6 +392,24 @@ export default function ParentChatModal({ onClose }: { onClose?: () => void } = 
                     <span>Use words</span>
                 </button>
             </form>
+
+            {s.isClearChatOpen && (
+                <Modal label="Clear chat" onClose={a.cancelClearChat} className="m-auto w-[calc(100%-2rem)] max-w-md rounded-xl border border-slate-300 bg-white p-5 text-slate-900 shadow-xl">
+                    <h2 className="text-lg font-bold">Hide chat history on this device?</h2>
+                    <p className="mt-2 text-sm text-slate-700">
+                        Messages waiting to send will stay visible. Message copies are kept on this device and in shared history.
+                    </p>
+                    {s.clearChatError && <p role="alert" className="mt-3 text-sm font-medium text-rose-700">{s.clearChatError}</p>}
+                    <div className="mt-4 flex flex-wrap justify-end gap-2">
+                        <button type="button" autoFocus onClick={a.cancelClearChat} className="min-h-11 rounded-lg border border-slate-300 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700">
+                            Cancel
+                        </button>
+                        <button type="button" onClick={a.clearChat} className="min-h-11 rounded-lg border border-rose-300 bg-rose-50 px-4 text-sm font-semibold text-rose-800 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-700">
+                            Clear chat
+                        </button>
+                    </div>
+                </Modal>
+            )}
         </section>
     );
 }

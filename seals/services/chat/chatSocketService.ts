@@ -35,6 +35,7 @@ export function isSameChatBindingContext(
 export interface ChatHistoryMeta {
     hasMore: boolean;
     loadingOlder: boolean;
+    oldestCreatedAt: string | null;
 }
 
 export interface ChatSocketListener {
@@ -198,6 +199,7 @@ export class ChatSocketService implements IChatSocketService {
         return {
             hasMore: this.hasMoreHistory,
             loadingOlder: this.loadingOlderGen !== null && this.loadingOlderGen === this.connectionGen,
+            oldestCreatedAt: this.oldestHistoryCursor?.createdAt ?? null,
         };
     }
 
@@ -317,8 +319,7 @@ export class ChatSocketService implements IChatSocketService {
         const context = { ...this.activeContext };
         const cursor = { ...this.oldestHistoryCursor };
         if (!UUID_RE.test(cursor.id) || typeof cursor.createdAt !== "string" || cursor.createdAt.length === 0) {
-            this.oldestHistoryCursor = null;
-            this.setHistoryMeta(false, null);
+            this.setHistoryMeta(false, null, null);
             return { ok: false, loadedCount: 0, hasMore: false, error: "Invalid chat history cursor." };
         }
         if (typeof client.from !== "function") {
@@ -364,14 +365,14 @@ export class ChatSocketService implements IChatSocketService {
                 .filter((msg): msg is ChatMessage => msg !== null);
 
             const oldest = verifiedMessages[0];
-            this.oldestHistoryCursor =
+            const oldestCursor =
                 oldest?.createdAt && UUID_RE.test(oldest.id)
                     ? { createdAt: oldest.createdAt, id: oldest.id }
                     : null;
-            const nextHasMore = hasMore && verifiedMessages.length > 0 && this.oldestHistoryCursor !== null;
+            const nextHasMore = hasMore && oldestCursor !== null;
 
             this.notifyMessages(verifiedMessages, context, gen);
-            this.setHistoryMeta(nextHasMore, null);
+            this.setHistoryMeta(nextHasMore, null, oldestCursor);
             return { ok: true, loadedCount: verifiedMessages.length, hasMore: nextHasMore };
         } catch {
             if (this.isActiveAttempt(gen, context)) {
@@ -397,8 +398,7 @@ export class ChatSocketService implements IChatSocketService {
         ++this.connectionGen;
         this.connectingGen = null;
         this.clearAuthRetryListener();
-        this.oldestHistoryCursor = null;
-        this.setHistoryMeta(false, null);
+        this.setHistoryMeta(false, null, null);
         const channel = this.channel;
         this.channel = null;
         const client = this.getClient();
@@ -420,12 +420,18 @@ export class ChatSocketService implements IChatSocketService {
         }
     }
 
-    private setHistoryMeta(hasMore: boolean, loadingOlderGen: number | null): void {
+    private setHistoryMeta(
+        hasMore: boolean,
+        loadingOlderGen: number | null,
+        cursor: { createdAt: string; id: string } | null = this.oldestHistoryCursor,
+    ): void {
         const prev = this.getHistoryMeta();
         this.hasMoreHistory = hasMore;
         this.loadingOlderGen = loadingOlderGen;
+        this.oldestHistoryCursor = cursor;
         const next = this.getHistoryMeta();
-        if (prev.hasMore === next.hasMore && prev.loadingOlder === next.loadingOlder) return;
+        if (prev.hasMore === next.hasMore && prev.loadingOlder === next.loadingOlder &&
+            prev.oldestCreatedAt === next.oldestCreatedAt) return;
         for (const listener of this.listeners) {
             listener.onHistoryMetaChange?.(next);
         }
@@ -475,8 +481,7 @@ export class ChatSocketService implements IChatSocketService {
                 oldest?.createdAt && UUID_RE.test(oldest.id)
                     ? { createdAt: oldest.createdAt, id: oldest.id }
                     : null;
-            this.oldestHistoryCursor = oldestCursor;
-            this.setHistoryMeta(hasMore && oldestCursor !== null, null);
+            this.setHistoryMeta(hasMore && oldestCursor !== null, null, oldestCursor);
             this.notifyMessages(verifiedMessages, context, gen);
             this.setStatus("connected");
             void this.flushPendingQueue(gen, context);

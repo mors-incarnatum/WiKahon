@@ -3,7 +3,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { isGuardianRole, LOCAL_CHILD_SESSION } from "@/models/auth";
 import { useBoardStore, useBoardStoreApi } from "@/store/BoardProvider";
-import { createBoundChatSocketHandlers, matchesChatBindingContext, resolveChatBindingContext } from "@/store/useBoardStore";
+import {
+    chatReadScopeKey,
+    chatTimestamp,
+    createBoundChatSocketHandlers,
+    filterClearedChatMessages,
+    matchesChatBindingContext,
+    resolveChatBindingContext,
+} from "@/store/useBoardStore";
 import { useChatDraftContext } from "@/viewmodels/useChatDraftViewModel";
 import type { ChatMessage } from "@/models/boardData";
 import {
@@ -34,16 +41,26 @@ export function useParentChatViewModel(
     );
     const storedMessages = useBoardStore(s => s.experimentalData?.chatMessages) ?? EMPTY_MESSAGES;
     const currentUserId = currentUser?.id ?? null;
+    const clearKey = currentUserId ? chatReadScopeKey(currentUserId, activeProfileId, cloudProfileId) : null;
+    const clearMarker = useBoardStore(s => clearKey ? s.chatClearMarkers[clearKey] : undefined);
     const messages = useMemo(() => {
         if (!currentUserId) return EMPTY_MESSAGES;
-        if (currentUserId === LOCAL_CHILD_SESSION.user.id) {
-            return storedMessages.filter(message => message.verified !== true && !message.pendingContext);
-        }
-        return storedMessages;
-    }, [currentUserId, storedMessages]);
+        const availableMessages = currentUserId === LOCAL_CHILD_SESSION.user.id
+            ? storedMessages.filter(message => message.verified !== true && !message.pendingContext)
+            : storedMessages;
+        return clearMarker ? filterClearedChatMessages(availableMessages, clearMarker) : availableMessages;
+    }, [clearMarker, currentUserId, storedMessages]);
     const addChatMessage = useBoardStore(s => s.addChatMessage);
     const dismissLegacyMessages = useBoardStore(s => s.dismissLegacyChatMessages);
     const scope = JSON.stringify([currentUser?.id, activeProfileId, cloudProfileId]);
+    const historyScope = `${scope}:${clearMarker?.verifiedThrough ?? ""}:${clearMarker?.messageIds.length ?? 0}`;
+    const [clearEntry, setClearEntry] = useState<{
+        scope: string;
+        status: "confirm" | "error" | "cleared";
+    } | null>(null);
+    const clearStatus = clearEntry?.scope === scope ? clearEntry.status : null;
+    const canClearChat = messages.some(message => !message.pendingContext);
+    const isClearChatOpen = clearStatus === "confirm" || clearStatus === "error";
     const [errorEntry, setErrorEntry] = useState<{ scope: string; text: string; messageId?: string } | null>(null);
     const [loadOlderErrorEntry, setLoadOlderErrorEntry] = useState<{ scope: string; text: string } | null>(null);
     const draft = chatDraft.state.text;
@@ -60,6 +77,11 @@ export function useParentChatViewModel(
         ? connectionEntry.status
         : socketService.isConfigured() ? "unlinked" : "unconfigured";
     const historyMeta = boundChatContext && historyEntry?.scope === scope ? historyEntry.meta : null;
+    const oldestFetchedTimestamp = chatTimestamp(historyMeta?.oldestCreatedAt);
+    const verifiedThrough = clearMarker?.verifiedThrough;
+    const reachedClearMarker = verifiedThrough != null && oldestFetchedTimestamp !== null &&
+        oldestFetchedTimestamp <= verifiedThrough;
+    const hasMoreHistory = (historyMeta?.hasMore ?? false) && !reachedClearMarker;
 
     useEffect(() => {
         const activeContext =
@@ -160,9 +182,9 @@ export function useParentChatViewModel(
             messages,
             legacyMessageCount: messages.filter(m => m.verified !== true && !m.pendingContext).length,
             hasPendingMessages: messages.some(m => m.verified !== true && m.pendingContext),
-            hasMoreHistory: historyMeta?.hasMore ?? false,
-            isLoadingOlder: historyMeta?.loadingOlder ?? false,
-            loadOlderError,
+            hasMoreHistory,
+            isLoadingOlder: hasMoreHistory && (historyMeta?.loadingOlder ?? false),
+            loadOlderError: reachedClearMarker ? null : loadOlderError,
             draft,
             draftTokens: chatDraft.state.draftTokens,
             colorMode,
@@ -170,6 +192,11 @@ export function useParentChatViewModel(
             senderRole,
             currentUserId,
             scope,
+            historyScope,
+            canClearChat,
+            isClearChatOpen,
+            clearChatError: clearStatus === "error" ? "Could not clear chat on this device. Try again." : null,
+            clearChatNotice: clearStatus === "cleared" ? "Chat history cleared on this device." : null,
             focusOnResume: chatDraft.state.focusOnResume,
             connectionStatus,
             isConnected: connectionStatus === "connected",
@@ -188,6 +215,16 @@ export function useParentChatViewModel(
             sendAsChild: sendMessage,
             loadOlderMessages,
             reconnect,
+            openClearChat: () => {
+                if (canClearChat) setClearEntry({ scope, status: "confirm" });
+            },
+            cancelClearChat: () => setClearEntry(null),
+            clearChat: () => {
+                if (!clearKey || !isClearChatOpen) return;
+                const cleared = storeApi.getState().clearChatHistory(clearKey);
+                setClearEntry({ scope, status: cleared ? "cleared" : "error" });
+                if (cleared) setLoadOlderErrorEntry(null);
+            },
             dismissLegacyMessages: () => {
                 if (!dismissLegacyMessages()) setSendError("Could not remove local messages from this device.");
             },
